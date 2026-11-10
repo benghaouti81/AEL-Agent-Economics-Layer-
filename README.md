@@ -51,20 +51,25 @@ Both engines write to a unified, file-backed **SQLite Decision Log (`better-sqli
 - **Run Command**: `npx tsx bin/ael.ts eval --suite budget --split held_out`
 - **Execution Date**: 2026-11-10
 - **Validation Mode**: *Offline Plumbing/Smoke Test (Zero Live API Key in Environment)*
+- **Dataset Composition**: 200 distinct, high-difficulty queries with zero template cycling:
+  - **Factual (50 distinct)**: Multi-hop history, astrophysics, biochemistry, sovereign treaties, cryptography, linguistics.
+  - **Math (50 distinct)**: Modular arithmetic, differential equations, Markov chains, probability, linear algebra, number theory.
+  - **Code (50 distinct)**: Lock-free ring buffers, topological sort, LRU caches, reactive observables, AST visitors, async pools.
+  - **Extraction (50 distinct)**: Nested B2B invoices, clinical vitis, git merge conflicts, Kubernetes audit logs, SEC 10-K filings.
 
 | Task Category | Evaluated Queries | Baseline Tokens | AEL Actual Tokens | Token Reduction | Baseline Accuracy | AEL Accuracy | Net USD Saved |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Factual Lookup** | 50 | 47,238 | 5,838 | **87.6%** | 96.0% | 100.0% | +$0.02485 |
-| **Multi-step Math / Logic** | 50 | 47,227 | 22,079 | **53.2%** | 96.0% | 100.0% | +$0.01629 |
-| **Code Synthesis / Debug** | 50 | 47,327 | 22,278 | **52.9%** | 96.0% | 100.0% | +$0.01627 |
-| **Structured Extraction** | 50 | 47,507 | 6,107 | **87.1%** | 96.0% | 100.0% | +$0.02485 |
-| **TOTAL (HELD-OUT)** | **200** | **189,299** | **56,302** | **70.3%** | **96.0%** | **100.0%** | **+$0.08226** |
+| **Factual Lookup** | 50 unique | 47,345 | 7,916 | **83.3%** | 96.0% | 100.0% | +$0.02381 |
+| **Multi-step Math / Logic** | 50 unique | 47,103 | 21,830 | **53.7%** | 96.0% | 100.0% | +$0.01631 |
+| **Code Synthesis / Debug** | 50 unique | 47,181 | 21,989 | **53.4%** | 96.0% | 100.0% | +$0.01629 |
+| **Structured Extraction** | 50 unique | 47,533 | 6,461 | **86.4%** | 96.0% | 100.0% | +$0.02467 |
+| **TOTAL (HELD-OUT)** | **200 distinct** | **189,162** | **58,196** | **69.2%** | **96.0%** | **100.0%** | **+$0.08109** |
 
 - **p95 Middleware Overhead**: **8 ms** (SLO Contract $< 500\text{ms}$: **PASS**).
-- **Cost / Completed Task (Simulated)**: Baseline: **$0.00056** $\to$ AEL: **$0.00014**.
+- **Cost / Completed Task (Simulated)**: Baseline: **$0.00056** $\to$ AEL: **$0.00015**.
 
 > [!IMPORTANT]
-> **Mock Eval Limitation Disclosure**: The budget figures above are from the synthetic smoke harness run in offline mode without live upstream API keys. Per project discipline, these serve as architectural proof of the engine's control flow, not empirical benchmark evidence. Live model benchmarking requires configuring `GEMINI_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY`.
+> **Mock Eval Limitation Disclosure**: The budget figures above are from the synthetic smoke harness run in offline mode without live upstream API keys (using 200 distinct handcrafted held-out prompts). Per project discipline, these serve as architectural proof of the engine's control flow, not empirical benchmark evidence. Live model benchmarking requires configuring `GEMINI_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY`.
 
 ---
 

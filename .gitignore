@@ -6,3 +6,7 @@ coverage/
 *.log
 .env*
 !.env.example
+data/*.db*
+data/*.db-wal
+data/*.db-shm
+.aistudio/

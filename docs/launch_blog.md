@@ -46,9 +46,9 @@ AEL ships with a unified, file-backed **SQLite Decision Log (`better-sqlite3`)**
 $$\text{Net Savings} = \text{Baseline Cost} - (\text{Upstream Cost} + \text{AEL Internal Cost})$$
 
 Our evaluation harness features an expanded **200-query held-out benchmark split** (50 queries each across factual lookup, multi-step math/logic, code synthesis, and structured data extraction) spanning simple to expert-level constraints. In local plumbing execution (`evals/results/2026-11-10_budget_held_out.json`):
-- **70.3% token reduction** demonstrated vs. fixed-high-effort baselines.
+- **69.2% token reduction** demonstrated vs. fixed-high-effort baselines.
 - **p95 decision overhead of 8 ms**, far below the 500 ms contract cap.
-- Direct drop in cost per completed task from $\$0.00056$ baseline to $\$0.00014$.
+- Direct drop in cost per completed task from $\$0.00056$ baseline to $\$0.00015$.
 
 *(Note: Live model acceptance benchmarking requires provisioning provider API keys; offline execution is reported transparently as a control-flow plumbing validation).*
 

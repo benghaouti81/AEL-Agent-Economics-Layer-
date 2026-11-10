@@ -1,6 +1,0 @@
-{
-  "summary":  "Revised implementation plan for AEL v0.1.0 incorporating net savings accounting with AEL internal overhead tracking, negative-savings circuit breaker with rolling window pass-through tripping, and the explicit two-surface integration and interception contract.",
-  "updatedAt":  "2026-11-10T19:34:28.706874649Z",
-  "requestFeedback":  true,
-  "userFacing":  true
-}

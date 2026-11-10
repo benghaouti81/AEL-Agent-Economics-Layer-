@@ -51,3 +51,15 @@ This document records the architectural and system engineering decisions made in
 ## ADR-007: Frozen Read-Only Dashboard Scope
 - **Decision**: The React dashboard at `/dashboard` is strictly frozen as a single read-only view fed exclusively by `GET /api/metrics/summary` and `GET /api/metrics/decisions`.
 - **Rationale**: Prevents scope creep. The CLI (`ael report`, `ael eval`) is the primary reporting engine; the dashboard is a convenient executive receipt demonstrating economic value.
+
+---
+
+## ADR-008: 200 Distinct Held-Out Benchmark Dataset Composition
+- **Decision**: The Thinking Budget evaluation suite (`evals/suites/budget_eval_suite.ts`) specifies 200 completely unique, handcrafted high-difficulty queries (50 per category across factual, math, code, and extraction), prohibiting modulo cycling (`i % pool.length`) or artificial prompt padding (`[Item #N]`).
+- **Rationale**: Real benchmark integrity requires genuine prompt diversity across algorithmic complexity, linguistic phrasing, and technical domains. Repetitive template cycling artificially skews cache dynamics and token lengths.
+
+---
+
+## ADR-009: Deterministic CI Execution via `package-lock.json`
+- **Decision**: Commit a clean, audited `package-lock.json` and align `esbuild` peer dependency ranges with Vite 8.x to ensure `npm ci` executes deterministically in GitHub Actions workflows without build or resolution failures.
+- **Rationale**: GitHub Actions runners executing `actions/setup-node@v4` with `cache: 'npm'` and `npm ci` strictly mandate an authoritative, lockfile-backed dependency graph.
