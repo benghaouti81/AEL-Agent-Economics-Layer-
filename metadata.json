@@ -1,0 +1,6 @@
+{
+  "name": "AEL — Agent Economics Layer",
+  "description": "Self-hosted economic middleware for AI agents enforcing Tool-DC tool selection and AERA/CoBa adaptive test-time compute allocation with SQLite decision logging and cost savings analytics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
