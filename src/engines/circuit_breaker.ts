@@ -21,6 +21,7 @@ export interface WorkflowBreakerState {
 
 export class CircuitBreakerController {
   private trippedWorkflows: Map<string, { tripped: boolean; reason: string; timestamp: number }> = new Map();
+  private resetTimestamps: Map<string, number> = new Map();
 
   constructor(
     private config: CircuitBreakerConfig,
@@ -37,10 +38,14 @@ export class CircuitBreakerController {
       return { tripped: true, reason: cached.reason };
     }
 
+    const resetAfter = this.resetTimestamps.get(workflow_id) || 0;
     // Evaluate rolling window from decision log
-    const recent = this.logStore.getWorkflowDecisions(workflow_id, this.config.rolling_window);
+    const recent = this.logStore
+      .getWorkflowDecisions(workflow_id, this.config.rolling_window)
+      .filter(r => r.timestamp > resetAfter);
+
     if (recent.length < 5) {
-      // Need minimum history before tripping
+      // Need minimum history after reset before tripping
       return { tripped: false };
     }
 
@@ -67,6 +72,7 @@ export class CircuitBreakerController {
 
   public resetWorkflow(workflow_id: string): void {
     this.trippedWorkflows.delete(workflow_id);
+    this.resetTimestamps.set(workflow_id, Date.now());
   }
 
   public getTrippedWorkflows(): Array<{ workflow_id: string; reason: string; timestamp: number }> {

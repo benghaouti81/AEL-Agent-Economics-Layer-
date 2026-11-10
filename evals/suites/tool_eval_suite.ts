@@ -7,6 +7,8 @@
  */
 
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import { ToolRegistry } from '../../src/mcp/registry.js';
 import { DryRunSandbox } from '../../src/mcp/sandbox.js';
 import { ToolDCEngine } from '../../src/engines/tool_dc.js';
@@ -19,6 +21,8 @@ import { ProviderProfile } from '../../src/config/ael_config.js';
 
 export interface ToolEvalResult {
   suite_name: string;
+  execution_date?: string;
+  run_command?: string;
   total_cases: number;
   successful_selections: number;
   accuracy: number;
@@ -180,8 +184,13 @@ export async function runToolEvalSuite(logStore: DecisionLogStore): Promise<Tool
   const accuracy = Number((successfulCount / testCases.length).toFixed(3));
   const passed_criteria = accuracy >= 0.90 && dryRunCatches >= 3;
 
-  return {
+  const now = new Date();
+  const dateStr = now.toISOString().split('T')[0];
+
+  const evalResult = {
     suite_name: 'Tool-DC Verification & Safety Suite',
+    execution_date: dateStr,
+    run_command: 'npx tsx bin/ael.ts eval --suite tool',
     total_cases: totalCases,
     successful_selections: successfulCount,
     accuracy,
@@ -189,4 +198,13 @@ export async function runToolEvalSuite(logStore: DecisionLogStore): Promise<Tool
     passed_criteria,
     cases: results,
   };
+
+  const resultsDir = path.resolve(process.cwd(), 'evals', 'results');
+  if (!fs.existsSync(resultsDir)) {
+    fs.mkdirSync(resultsDir, { recursive: true });
+  }
+  const evidenceFile = path.join(resultsDir, `${dateStr}_tool_selection.json`);
+  fs.writeFileSync(evidenceFile, JSON.stringify(evalResult, null, 2), 'utf8');
+
+  return evalResult;
 }

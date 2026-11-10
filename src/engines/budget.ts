@@ -95,8 +95,8 @@ export class BudgetEngine {
     // Evaluate difficulty heuristic based on task class & prompt features
     const isComplex = this.assessComplexityHeuristic(prompt, task_category);
 
-    if (policy.regime === 'sample' || (isComplex && policy.effort_ladder.length > 1)) {
-      // REGIME: SAMPLE (Self-Consistency Consensus Probe)
+    if (policy.regime === 'sample') {
+      // REGIME: SAMPLE (Self-Consistency Consensus Probe across k samples)
       const k = Math.min(policy.k_samples, 3);
       for (let i = 1; i < k; i++) {
         const sampleRes = await this.llm.complete(prompt, {
@@ -120,17 +120,17 @@ export class BudgetEngine {
         shouldEscalate = true;
       }
     } else {
-      // REGIME: SINGLE (Trajectory confidence probe)
-      if (probeResponse.logprob_confidence && probeResponse.logprob_confidence >= policy.evidence_confidence_threshold) {
-        confidenceSignal = 'model_confidence';
-        shouldEscalate = false;
-      } else if (!isComplex) {
-        // Simple query with stable output
-        confidenceSignal = 'consensus';
-        shouldEscalate = false;
-      } else {
+      // REGIME: SINGLE (Trajectory confidence probe with complexity escalation)
+      if (isComplex && policy.effort_ladder.length > 1) {
+        // High-difficulty task demands compute escalation beyond cheap probe
         confidenceSignal = 'insufficient_evidence';
         shouldEscalate = true;
+      } else if (probeResponse.logprob_confidence && probeResponse.logprob_confidence >= policy.evidence_confidence_threshold) {
+        confidenceSignal = 'model_confidence';
+        shouldEscalate = false;
+      } else {
+        confidenceSignal = 'consensus';
+        shouldEscalate = false;
       }
     }
 

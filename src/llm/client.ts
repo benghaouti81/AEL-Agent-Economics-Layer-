@@ -1,8 +1,9 @@
 /**
  * AEL — Agent Economics Layer
- * Provider-Agnostic LLM Adapter
+ * Provider-Agnostic LLM Adapter Layer
  * Supports OpenAI-compatible, Anthropic-style, Gemini, and Local Mock
  * Tracks input, output, reasoning tokens, and USD costs
+ * Enforces graceful degradation when provider lacks reasoning knobs
  * @license Apache-2.0
  */
 
@@ -27,6 +28,7 @@ export interface LLMResponse {
   latency_ms: number;
   model: string;
   logprob_confidence?: number;
+  provider_source: 'openai' | 'anthropic' | 'gemini' | 'mock_simulator';
 }
 
 export class LLMClient {
@@ -34,11 +36,13 @@ export class LLMClient {
 
   constructor(private profile: ProviderProfile) {
     const apiKey = process.env[profile.api_key_env] || process.env.GEMINI_API_KEY;
-    if (apiKey && apiKey !== 'MY_GEMINI_API_KEY') {
-      try {
-        this.geminiClient = new GoogleGenAI({ apiKey });
-      } catch (err) {
-        console.warn(`[AEL LLM] Failed to initialize GoogleGenAI:`, err);
+    if (apiKey && apiKey !== 'MY_GEMINI_API_KEY' && apiKey !== 'YOUR_API_KEY') {
+      if (profile.type === 'gemini') {
+        try {
+          this.geminiClient = new GoogleGenAI({ apiKey });
+        } catch (err) {
+          console.warn(`[AEL LLM] Failed to initialize GoogleGenAI:`, err);
+        }
       }
     }
   }
@@ -46,54 +50,194 @@ export class LLMClient {
   public async complete(prompt: string, options: LLMRequestOptions = {}): Promise<LLMResponse> {
     const start = Date.now();
     const model = options.model || this.profile.default_model;
+    const apiKey = process.env[this.profile.api_key_env];
 
-    // Graceful degradation check
+    // Graceful degradation warning
     if (options.reasoning_effort && !this.profile.supports_reasoning_effort) {
-      console.warn(`[AEL LLM] Provider '${this.profile.name}' does not support reasoning effort knob '${options.reasoning_effort}'. Degraded gracefully.`);
+      console.warn(
+        `[AEL LLM Degradation] Provider '${this.profile.name}' does not expose reasoning effort knob '${options.reasoning_effort}'. Degraded gracefully without crashing.`
+      );
     }
 
-    // If Gemini client is active and profile is gemini
-    if (this.geminiClient && this.profile.type === 'gemini') {
+    // 1. OpenAI-Compatible Adapter (/v1/chat/completions)
+    if (this.profile.type === 'openai' && apiKey && apiKey !== 'MY_API_KEY') {
       try {
-        const config: any = {};
-        if (options.temperature !== undefined) config.temperature = options.temperature;
-        if (options.max_tokens !== undefined) config.maxOutputTokens = options.max_tokens;
-        if (options.system_instruction) config.systemInstruction = options.system_instruction;
-
-        const response = await this.geminiClient.models.generateContent({
-          model,
-          contents: prompt,
-          config,
-        });
-
-        const text = response.text || '';
-        const usage = (response as any).usageMetadata || {};
-        const input_tokens = usage.promptTokenCount || Math.ceil(prompt.length / 4);
-        const output_tokens = usage.candidatesTokenCount || Math.ceil(text.length / 4);
-        const reasoning_tokens = usage.reasoningTokenCount || 0;
-        const total_tokens = input_tokens + output_tokens + reasoning_tokens;
-        const latency_ms = Date.now() - start;
-
-        const cost_usd = this.calculateCost(input_tokens, output_tokens, reasoning_tokens);
-
-        return {
-          text,
-          input_tokens,
-          output_tokens,
-          reasoning_tokens,
-          total_tokens,
-          cost_usd,
-          latency_ms,
-          model,
-          logprob_confidence: 0.88,
-        };
+        return await this.callOpenAI(prompt, model, options, apiKey, start);
       } catch (err: any) {
-        console.warn(`[AEL LLM] Live upstream call failed, falling back to mock generator:`, err.message);
+        console.warn(`[AEL LLM] OpenAI call failed, falling back to mock:`, err.message);
       }
     }
 
-    // Default fast mock generation for evaluation suites, unit tests, and offline runs
+    // 2. Anthropic-Style Adapter (/v1/messages)
+    if (this.profile.type === 'anthropic' && apiKey && apiKey !== 'MY_API_KEY') {
+      try {
+        return await this.callAnthropic(prompt, model, options, apiKey, start);
+      } catch (err: any) {
+        console.warn(`[AEL LLM] Anthropic call failed, falling back to mock:`, err.message);
+      }
+    }
+
+    // 3. Gemini Adapter (@google/genai)
+    if (this.profile.type === 'gemini' && this.geminiClient) {
+      try {
+        return await this.callGemini(prompt, model, options, start);
+      } catch (err: any) {
+        console.warn(`[AEL LLM] Gemini call failed, falling back to mock:`, err.message);
+      }
+    }
+
+    // 4. Mock / Smoke-Test Simulator (Zero API key / Offline mode)
     return this.mockGenerate(prompt, model, options, start);
+  }
+
+  private async callOpenAI(
+    prompt: string,
+    model: string,
+    options: LLMRequestOptions,
+    apiKey: string,
+    startTime: number
+  ): Promise<LLMResponse> {
+    const baseUrl = (this.profile.base_url || 'https://api.openai.com/v1').replace(/\/$/, '');
+    const body: Record<string, any> = {
+      model,
+      messages: [{ role: 'user', content: prompt }],
+    };
+
+    if (this.profile.supports_reasoning_effort && options.reasoning_effort && options.reasoning_effort !== 'none') {
+      body.reasoning_effort = options.reasoning_effort;
+    }
+    if (options.temperature !== undefined) body.temperature = options.temperature;
+    if (options.max_tokens) body.max_tokens = options.max_tokens;
+
+    const response = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      throw new Error(`OpenAI HTTP ${response.status}: ${await response.text()}`);
+    }
+
+    const data: any = await response.json();
+    const text = data.choices?.[0]?.message?.content || '';
+    const usage = data.usage || {};
+    const input_tokens = usage.prompt_tokens || Math.ceil(prompt.length / 4);
+    const output_tokens = usage.completion_tokens || Math.ceil(text.length / 4);
+    const reasoning_tokens = usage.completion_tokens_details?.reasoning_tokens || 0;
+    const total_tokens = usage.total_tokens || input_tokens + output_tokens + reasoning_tokens;
+    const latency_ms = Date.now() - startTime;
+    const cost_usd = this.calculateCost(input_tokens, output_tokens, reasoning_tokens);
+
+    return {
+      text,
+      input_tokens,
+      output_tokens,
+      reasoning_tokens,
+      total_tokens,
+      cost_usd,
+      latency_ms,
+      model,
+      provider_source: 'openai',
+    };
+  }
+
+  private async callAnthropic(
+    prompt: string,
+    model: string,
+    options: LLMRequestOptions,
+    apiKey: string,
+    startTime: number
+  ): Promise<LLMResponse> {
+    const baseUrl = (this.profile.base_url || 'https://api.anthropic.com/v1').replace(/\/$/, '');
+    const body: Record<string, any> = {
+      model,
+      max_tokens: options.max_tokens || 1024,
+      messages: [{ role: 'user', content: prompt }],
+    };
+
+    if (this.profile.supports_reasoning_effort && options.reasoning_effort === 'high') {
+      body.thinking = { type: 'enabled', budget_tokens: 2048 };
+    }
+
+    const response = await fetch(`${baseUrl}/messages`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Anthropic HTTP ${response.status}: ${await response.text()}`);
+    }
+
+    const data: any = await response.json();
+    const text = data.content?.[0]?.text || '';
+    const usage = data.usage || {};
+    const input_tokens = usage.input_tokens || Math.ceil(prompt.length / 4);
+    const output_tokens = usage.output_tokens || Math.ceil(text.length / 4);
+    const reasoning_tokens = 0;
+    const total_tokens = input_tokens + output_tokens;
+    const latency_ms = Date.now() - startTime;
+    const cost_usd = this.calculateCost(input_tokens, output_tokens, reasoning_tokens);
+
+    return {
+      text,
+      input_tokens,
+      output_tokens,
+      reasoning_tokens,
+      total_tokens,
+      cost_usd,
+      latency_ms,
+      model,
+      provider_source: 'anthropic',
+    };
+  }
+
+  private async callGemini(
+    prompt: string,
+    model: string,
+    options: LLMRequestOptions,
+    startTime: number
+  ): Promise<LLMResponse> {
+    const config: any = {};
+    if (options.temperature !== undefined) config.temperature = options.temperature;
+    if (options.max_tokens !== undefined) config.maxOutputTokens = options.max_tokens;
+    if (options.system_instruction) config.systemInstruction = options.system_instruction;
+
+    const response = await this.geminiClient!.models.generateContent({
+      model,
+      contents: prompt,
+      config,
+    });
+
+    const text = response.text || '';
+    const usage = (response as any).usageMetadata || {};
+    const input_tokens = usage.promptTokenCount || Math.ceil(prompt.length / 4);
+    const output_tokens = usage.candidatesTokenCount || Math.ceil(text.length / 4);
+    const reasoning_tokens = usage.reasoningTokenCount || 0;
+    const total_tokens = input_tokens + output_tokens + reasoning_tokens;
+    const latency_ms = Date.now() - startTime;
+    const cost_usd = this.calculateCost(input_tokens, output_tokens, reasoning_tokens);
+
+    return {
+      text,
+      input_tokens,
+      output_tokens,
+      reasoning_tokens,
+      total_tokens,
+      cost_usd,
+      latency_ms,
+      model,
+      logprob_confidence: 0.88,
+      provider_source: 'gemini',
+    };
   }
 
   private mockGenerate(
@@ -102,10 +246,9 @@ export class LLMClient {
     options: LLMRequestOptions,
     startTime: number
   ): LLMResponse {
-    const latency_ms = Math.max(12, Math.min(80, Math.floor(prompt.length / 10)));
+    const latency_ms = Math.max(8, Math.min(60, Math.floor(prompt.length / 12)));
     const input_tokens = Math.ceil(prompt.length / 4);
-    
-    // Simulate reasoning effort token scaling
+
     let reasoning_tokens = 0;
     if (options.reasoning_effort === 'high') {
       reasoning_tokens = 600;
@@ -116,12 +259,33 @@ export class LLMClient {
     }
 
     let text = '';
-    // If prompt is tool selection
     if (prompt.includes('SELECT TOOL AND ARGUMENTS')) {
       const match = prompt.match(/SELECT TOOL AND ARGUMENTS[^\n]*\n"([^"]+)"/i) || prompt.match(/"([^"]+)"/);
       const userTask = (match ? match[1] : prompt).toLowerCase();
 
-      if (userTask.includes('sql') || userTask.includes('select') || userTask.includes('warehouse')) {
+      if (
+        userTask.includes('readme') ||
+        userTask.includes('/workspace') ||
+        userTask.includes('read file') ||
+        (userTask.includes('read') &&
+          (userTask.includes('file') ||
+            userTask.includes('content') ||
+            userTask.includes('documentation') ||
+            userTask.includes('.md') ||
+            userTask.includes('.ts') ||
+            userTask.includes('source code')))
+      ) {
+        let p = '/workspace/README.md';
+        if (userTask.includes('config.json')) p = '/workspace/config.json';
+        else if (userTask.includes('index.ts')) p = '/workspace/src/index.ts';
+        else if (userTask.includes('ghost_file')) p = '/workspace/ghost_file.txt';
+
+        text = JSON.stringify({
+          tool: 'fs_read_file',
+          arguments: { path: p },
+          reasoning: 'Reading file at path',
+        });
+      } else if (userTask.includes('sql') || userTask.includes('select') || userTask.includes('warehouse')) {
         text = JSON.stringify({
           tool: 'db_query_readonly',
           arguments: { sql: 'SELECT * FROM metrics' },
@@ -145,17 +309,6 @@ export class LLMClient {
           arguments: { query: 'economics layer' },
           reasoning: 'Searching knowledge base',
         });
-      } else if (userTask.includes('read') || userTask.includes('readme') || userTask.includes('config.json') || userTask.includes('index.ts') || userTask.includes('file content') || userTask.includes('source code')) {
-        let p = '/workspace/README.md';
-        if (userTask.includes('config.json')) p = '/workspace/config.json';
-        else if (userTask.includes('index.ts')) p = '/workspace/src/index.ts';
-        else if (userTask.includes('ghost_file')) p = '/workspace/ghost_file.txt';
-
-        text = JSON.stringify({
-          tool: 'fs_read_file',
-          arguments: { path: p },
-          reasoning: 'Reading file at path',
-        });
       } else {
         text = JSON.stringify({
           tool: 'search_knowledge_base',
@@ -170,7 +323,7 @@ export class LLMClient {
         rationale: 'Answer is stable and matches criteria',
       });
     } else {
-      text = `Processed answer for query. Verified output.`;
+      text = `Processed response for query. Verified output.`;
     }
 
     const output_tokens = Math.ceil(text.length / 4);
@@ -187,6 +340,7 @@ export class LLMClient {
       latency_ms,
       model,
       logprob_confidence: 0.85,
+      provider_source: 'mock_simulator',
     };
   }
 

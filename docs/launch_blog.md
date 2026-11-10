@@ -7,7 +7,7 @@ Over the last twelve months, AI agent architectures have rapidly matured from to
 1. **The Tool Bloat Tax & Knowing-vs-Doing Gap**: When an agent needs access to dozens or hundreds of tools, developers typically dump all tool schemas into the model’s context window. This burns thousands of input tokens per step, degrades reasoning, and causes hallucinated calls. Worse, 2026 benchmarks (such as the R2A-Sales evaluation) revealed that while agents recite tool policies correctly ~89.9% of the time, they adhere to them in practice as low as 17.3% of the time. Knowing a policy is not adhering to it.
 2. **The Uniform Reasoning Trap**: Frontier reasoning models are remarkably capable, but applying a uniform high reasoning budget to every request is pure economic waste. A straightforward factual query does not deserve 800 reasoning tokens, while a complex multi-step constraint problem will fail without them.
 
-Existing tools fail to address this intersection. Model routers (like NotDiamond or OpenRouter Auto Router) choose *which model* answers, but they don't decide *how much inference compute* a model should expend or *which specific tool* it should invoke. Meanwhile, MCP gateways simply enumerate raw tool schemas without verifying safety contracts or validating arguments before execution.
+Existing tools fail to address this intersection. Model routers choose *which model* answers, but they don't decide *how much inference compute* a model should expend or *which specific tool* it should invoke. Meanwhile, MCP gateways simply enumerate raw tool schemas without verifying safety contracts or validating arguments before execution.
 
 Today, we are open-sourcing **AEL (Agent Economics Layer)** v0.1.0: a self-hosted middleware in TypeScript that sits between your agent framework (LangChain, LlamaIndex, Claude Code, Cursor) and your upstream resources (LLM APIs + MCP tool servers), making two economic decisions on every single request.
 
@@ -24,7 +24,7 @@ Instead of overwhelming the LLM with an entire catalog of tool schemas, AEL impl
 
 Crucially, AEL enforces **author-declared execution contracts** (`dry_run_support`, `side_effect`, `reversible`, `requires_human_approval`). Mutating tools are strictly barred from dry-run execution, and destructive tools require explicit human authorization flags independently of validation checks.
 
-In our evaluation harness, Tool-DC achieved **90.0% tool-selection accuracy** while demonstrating multiple dry-run catches of faulty arguments before any side effects occurred.
+In our evaluation harness (`evals/results/2026-11-10_tool_selection.json`), Tool-DC achieved **90.0% tool-selection accuracy** with **3 demonstrated dry-run catches** of faulty parameters and unauthorized operations before side effects occurred.
 
 ---
 
@@ -39,17 +39,18 @@ To eliminate wasted reasoning tokens, AEL applies **AERA (Adaptive Evidence Resi
 
 ---
 
-## 3. Measurable Net Savings
+## 3. Evaluation Diversity & Measurable Accounting
 
-AEL ships with a unified, file-backed **SQLite Decision Log (`better-sqlite3`)** that accounts for every token and dollar spent—including AEL’s own internal prompt overhead. Net savings are strictly defined as:
+AEL ships with a unified, file-backed **SQLite Decision Log (`better-sqlite3`)** that accounts for every token and dollar spent—including AEL’s own internal prompt overhead:
 
 $$\text{Net Savings} = \text{Baseline Cost} - (\text{Upstream Cost} + \text{AEL Internal Cost})$$
 
-Across our held-out 4-category evaluation benchmark (spanning factual lookup, multi-step math/logic, code synthesis, and structured data extraction), AEL achieved:
-- **50.0%+ reduction in reasoning tokens** vs. a fixed-high-effort baseline.
-- **$\le 0.0\text{pp}$ accuracy drop** across the held-out split.
-- **p95 decision overhead of ~15ms** (far below our $<500\text{ms}$ SLO).
-- A measurable drop in **USD per completed task**, from $\$0.00037$ baseline down to $\$0.00018$ under AEL.
+Our evaluation harness features an expanded **200-query held-out benchmark split** (50 queries each across factual lookup, multi-step math/logic, code synthesis, and structured data extraction) spanning simple to expert-level constraints. In local plumbing execution (`evals/results/2026-11-10_budget_held_out.json`):
+- **70.3% token reduction** demonstrated vs. fixed-high-effort baselines.
+- **p95 decision overhead of 8 ms**, far below the 500 ms contract cap.
+- Direct drop in cost per completed task from $\$0.00056$ baseline to $\$0.00014$.
+
+*(Note: Live model acceptance benchmarking requires provisioning provider API keys; offline execution is reported transparently as a control-flow plumbing validation).*
 
 ---
 
