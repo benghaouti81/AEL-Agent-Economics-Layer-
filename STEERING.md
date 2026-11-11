@@ -99,6 +99,16 @@ integration testing; migrating better-sqlite3 to node:sqlite (one
 dedicated commit, tests green, after the v0.1.0 gate); any new engine or
 dashboard feature.
 
+- An `ael doctor` / `npm run verify-repo` completeness check: fails loudly if
+  tests/, evals/, .github/workflows/, or docs/ are missing or diverged from
+  the repo manifest — so any partial sync (e.g. workspace export tools that
+  silently drop folders) is caught immediately instead of silently losing the
+  project's verifiable half. One dedicated commit, tests green, after the
+  v0.1.0 gate.
+- A documented onboarding round-trip (CONTRIBUTING.md): import from GitHub →
+  work → verify → push back, tested against at least one constrained
+  environment. "Self-hosted" means the round-trip works, not just the install.
+
 ## 7. COMMUNICATION CONTRACT
 Every reply ends with one of: (a) commit SHAs + push output + Actions run
 URL, (b) "NOT DONE: <reason>" + raw error, or (c) a specific question if
