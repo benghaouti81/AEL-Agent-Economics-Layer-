@@ -152,7 +152,7 @@ export class BudgetEngine {
       aelInternalCost += judgeRes.cost_usd;
 
       finalResponse = judgeRes;
-      confidenceSignal = 'externally_verified'; // Evaluated and resolved by verifier step
+      confidenceSignal = 'model_confidence'; // Evaluated and resolved by LLM judge step
     }
 
     const totalLatency = Date.now() - startTime;

@@ -60,7 +60,7 @@ describe('BudgetEngine Scaling Regimes & Escalation', () => {
 
     expect(res.escalated).toBe(true);
     expect(res.escalation_levels).toBeGreaterThanOrEqual(1);
-    expect(res.confidence_signal).toBe('externally_verified');
+    expect(res.confidence_signal).toBe('model_confidence');
     expect(res.ael_internal_tokens).toBeGreaterThan(0);
   });
 
