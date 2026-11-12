@@ -84,7 +84,11 @@ export class BudgetEngine {
     upstreamTokens += probeResponse.total_tokens;
     upstreamCost += probeResponse.cost_usd;
 
+    // Initialize cumulative AEL decision overhead time (ms)
+    let aelOverheadMs = 0;
+
     // STEP 2: EVIDENCE RESIDUAL CHECK (CoBa & AERA controller)
+    const decisionStep1Start = performance.now();
     let confidenceSignal: ConfidenceLevel = 'insufficient_evidence';
     let shouldEscalate = false;
     let escalationLevels = 0;
@@ -97,6 +101,7 @@ export class BudgetEngine {
 
     if (policy.regime === 'sample') {
       // REGIME: SAMPLE (Self-Consistency Consensus Probe across k samples)
+      aelOverheadMs += performance.now() - decisionStep1Start;
       const k = Math.min(policy.k_samples, 3);
       for (let i = 1; i < k; i++) {
         const sampleRes = await this.llm.complete(prompt, {
@@ -109,6 +114,7 @@ export class BudgetEngine {
         candidateAnswers.push(sampleRes.text);
       }
 
+      const consensusStart = performance.now();
       // Check consensus among samples
       const consensusAgreement = this.calculateConsensus(candidateAnswers);
       if (consensusAgreement >= policy.evidence_confidence_threshold) {
@@ -119,6 +125,7 @@ export class BudgetEngine {
         confidenceSignal = 'insufficient_evidence';
         shouldEscalate = true;
       }
+      aelOverheadMs += performance.now() - consensusStart;
     } else {
       // REGIME: SINGLE (Trajectory confidence probe with complexity escalation)
       if (isComplex && policy.effort_ladder.length > 1) {
@@ -132,12 +139,14 @@ export class BudgetEngine {
         confidenceSignal = 'consensus';
         shouldEscalate = false;
       }
+      aelOverheadMs += performance.now() - decisionStep1Start;
     }
 
     // STEP 3: ESCALATE OR STOP
     let finalResponse = probeResponse;
 
     if (shouldEscalate) {
+      const escalateDecisionStart = performance.now();
       // Escalate to next reasoning effort tier
       const currentEffortIndex = policy.effort_ladder.indexOf(initialEffort);
       const nextEffortIndex = Math.min(policy.effort_ladder.length - 1, Math.max(0, currentEffortIndex + 1));
@@ -146,17 +155,21 @@ export class BudgetEngine {
 
       // Judge step (AEL internal verifier compute)
       const judgePrompt = `EVALUATE EVIDENCE AND RESOLVE QUERY:\nTask: ${prompt}\nPreliminary Candidates:\n${candidateAnswers.join('\n---\n')}`;
+      aelOverheadMs += performance.now() - escalateDecisionStart;
+
       const judgeRes = await this.llm.complete(judgePrompt, { reasoning_effort: finalEffort });
 
+      const judgePostStart = performance.now();
       aelInternalTokens += judgeRes.total_tokens;
       aelInternalCost += judgeRes.cost_usd;
 
       finalResponse = judgeRes;
       confidenceSignal = 'model_confidence'; // Evaluated and resolved by LLM judge step
+      aelOverheadMs += performance.now() - judgePostStart;
     }
 
     const totalLatency = Date.now() - startTime;
-    const aelOverheadMs = shouldEscalate ? Math.floor(totalLatency * 0.35) : 8;
+    const finalAelOverheadMs = Math.max(0, Math.round(aelOverheadMs));
 
     const actualTotalTokens = upstreamTokens + aelInternalTokens;
     const actualTotalCost = upstreamCost + aelInternalCost;
@@ -197,7 +210,7 @@ export class BudgetEngine {
       ael_internal_cost_usd: aelInternalCost,
       net_cost_saved_usd: netCostSavedUsd,
       latency_ms: totalLatency,
-      ael_overhead_ms: aelOverheadMs,
+      ael_overhead_ms: finalAelOverheadMs,
       completed_successfully: true,
       circuit_breaker_tripped: breakerStatus.tripped,
       pass_through: false,
@@ -219,7 +232,7 @@ export class BudgetEngine {
       baseline_tokens: baselineTotalTokens,
       baseline_cost_usd: baselineCostUsd,
       latency_ms: totalLatency,
-      ael_overhead_ms: aelOverheadMs,
+      ael_overhead_ms: finalAelOverheadMs,
       circuit_breaker_tripped: breakerStatus.tripped,
       pass_through: false,
     };

@@ -44,6 +44,7 @@ describe('Budget Engine & Circuit Breaker', () => {
     expect(res.escalated).toBe(false);
     expect(res.total_tokens).toBeLessThan(res.baseline_tokens);
     expect(res.net_cost_saved_usd).toBeGreaterThan(0);
+    expect(res.ael_overhead_ms).toBeGreaterThanOrEqual(0);
   });
 
   it('records confidence signals adhering to the 4-tier taxonomy', async () => {
