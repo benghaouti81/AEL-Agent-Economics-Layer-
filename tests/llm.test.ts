@@ -151,10 +151,108 @@ describe('LLMClient Adapter Layer', () => {
     const highEffortRes = await client.complete('Complex analysis', { reasoning_effort: 'high' });
     expect(highEffortRes.reasoning_tokens).toBe(600);
     expect(highEffortRes.provider_source).toBe('mock_simulator');
+    expect(highEffortRes.confidence_source).toBe('unavailable');
+    expect(highEffortRes.logprob_confidence).toBeUndefined();
 
     const medEffortRes = await client.complete('Medium analysis', { reasoning_effort: 'medium' });
     expect(medEffortRes.reasoning_tokens).toBe(250);
     expect(medEffortRes.provider_source).toBe('mock_simulator');
+    expect(medEffortRes.confidence_source).toBe('unavailable');
+    expect(medEffortRes.logprob_confidence).toBeUndefined();
+  });
+
+  it('omits logprob_confidence and sets confidence_source=unavailable when providers lack logprobs, and uses real logprobs when present', async () => {
+    process.env.TEST_OPENAI_KEY = 'sk-test-123';
+    const openaiClient = new LLMClient({
+      name: 'openai_conf_test',
+      type: 'openai',
+      api_key_env: 'TEST_OPENAI_KEY',
+      default_model: 'gpt-4o-mini',
+      cheap_model: 'gpt-4o-mini',
+      reasoning_model: 'o3-mini',
+      supports_reasoning_effort: true,
+      supports_logprobs: true,
+      input_cost_per_million: 0.15,
+      output_cost_per_million: 0.60,
+      reasoning_cost_per_million: 0.60,
+    });
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { content: 'ok' } }],
+        usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
+      }),
+    }));
+    const noLogprobsRes = await openaiClient.complete('hello');
+    expect(noLogprobsRes.provider_source).toBe('openai');
+    expect(noLogprobsRes.confidence_source).toBe('unavailable');
+    expect(noLogprobsRes.logprob_confidence).toBeUndefined();
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { content: 'ok' }, logprobs: { content: [{ logprob: -0.1 }] } }],
+        usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
+      }),
+    }));
+    const withLogprobsRes = await openaiClient.complete('hello');
+    expect(withLogprobsRes.confidence_source).toBe('provider_logprobs');
+    expect(withLogprobsRes.logprob_confidence).toBeCloseTo(Math.exp(-0.1), 3);
+
+    process.env.TEST_ANTHROPIC_KEY = 'ant-test-123';
+    const anthropicClient = new LLMClient({
+      name: 'anthropic_conf_test',
+      type: 'anthropic',
+      api_key_env: 'TEST_ANTHROPIC_KEY',
+      default_model: 'claude-3-5-haiku-20241022',
+      cheap_model: 'claude-3-5-haiku-20241022',
+      reasoning_model: 'claude-3-7-sonnet-20250219',
+      supports_reasoning_effort: true,
+      supports_logprobs: false,
+      input_cost_per_million: 0.15,
+      output_cost_per_million: 0.60,
+      reasoning_cost_per_million: 0.60,
+    });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        content: [{ text: 'ok' }],
+        usage: { input_tokens: 10, output_tokens: 2 },
+      }),
+    }));
+    const antRes = await anthropicClient.complete('hello');
+    expect(antRes.provider_source).toBe('anthropic');
+    expect(antRes.confidence_source).toBe('unavailable');
+    expect(antRes.logprob_confidence).toBeUndefined();
+
+    process.env.GEMINI_API_KEY = 'gem-test-123';
+    const geminiClient = new LLMClient({
+      name: 'gemini_conf_test',
+      type: 'gemini',
+      api_key_env: 'GEMINI_API_KEY',
+      default_model: 'gemini-2.5-flash',
+      cheap_model: 'gemini-2.5-flash-lite',
+      reasoning_model: 'gemini-2.5-pro',
+      supports_reasoning_effort: true,
+      supports_logprobs: false,
+      input_cost_per_million: 0.10,
+      output_cost_per_million: 0.40,
+      reasoning_cost_per_million: 0.40,
+    });
+    (geminiClient as any).geminiClient = {
+      models: {
+        generateContent: vi.fn().mockResolvedValue({
+          text: 'gemini ok',
+          usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 3 },
+        }),
+      },
+    };
+    const gemRes = await geminiClient.complete('hello');
+    delete process.env.GEMINI_API_KEY;
+    expect(gemRes.provider_source).toBe('gemini');
+    expect(gemRes.confidence_source).toBe('unavailable');
+    expect(gemRes.logprob_confidence).toBeUndefined();
   });
 
   it('warns and degrades gracefully when reasoning effort is unsupported by provider profile', async () => {

@@ -132,7 +132,7 @@ export class BudgetEngine {
         // High-difficulty task demands compute escalation beyond cheap probe
         confidenceSignal = 'insufficient_evidence';
         shouldEscalate = true;
-      } else if (probeResponse.logprob_confidence && probeResponse.logprob_confidence >= policy.evidence_confidence_threshold) {
+      } else if (probeResponse.logprob_confidence !== undefined && probeResponse.logprob_confidence >= policy.evidence_confidence_threshold) {
         confidenceSignal = 'model_confidence';
         shouldEscalate = false;
       } else {

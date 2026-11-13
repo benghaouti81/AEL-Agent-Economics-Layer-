@@ -28,6 +28,7 @@ export interface LLMResponse {
   latency_ms: number;
   model: string;
   logprob_confidence?: number;
+  confidence_source: 'provider_logprobs' | 'unavailable';
   provider_source: 'openai' | 'anthropic' | 'gemini' | 'mock_simulator';
 }
 
@@ -150,6 +151,20 @@ export class LLMClient {
     const latency_ms = Date.now() - startTime;
     const cost_usd = this.calculateCost(input_tokens, output_tokens, reasoning_tokens);
 
+    const logprobContent = data.choices?.[0]?.logprobs?.content;
+    let logprob_confidence: number | undefined;
+    let confidence_source: 'provider_logprobs' | 'unavailable' = 'unavailable';
+    if (Array.isArray(logprobContent) && logprobContent.length > 0) {
+      const probs = logprobContent
+        .map((item: any) => item?.logprob)
+        .filter((lp: any) => typeof lp === 'number' && Number.isFinite(lp));
+      if (probs.length > 0) {
+        const avgProb = probs.reduce((acc: number, lp: number) => acc + Math.exp(lp), 0) / probs.length;
+        logprob_confidence = Number(Math.min(1, Math.max(0, avgProb)).toFixed(4));
+        confidence_source = 'provider_logprobs';
+      }
+    }
+
     return {
       text,
       input_tokens,
@@ -159,6 +174,8 @@ export class LLMClient {
       cost_usd,
       latency_ms,
       model,
+      ...(logprob_confidence !== undefined ? { logprob_confidence } : {}),
+      confidence_source,
       provider_source: 'openai',
     };
   }
@@ -214,6 +231,7 @@ export class LLMClient {
       cost_usd,
       latency_ms,
       model,
+      confidence_source: 'unavailable',
       provider_source: 'anthropic',
     };
   }
@@ -244,6 +262,14 @@ export class LLMClient {
     const latency_ms = Date.now() - startTime;
     const cost_usd = this.calculateCost(input_tokens, output_tokens, reasoning_tokens);
 
+    const avgLogprobs = (response as any).candidates?.[0]?.avgLogprobs;
+    let logprob_confidence: number | undefined;
+    let confidence_source: 'provider_logprobs' | 'unavailable' = 'unavailable';
+    if (typeof avgLogprobs === 'number' && Number.isFinite(avgLogprobs) && avgLogprobs <= 0) {
+      logprob_confidence = Number(Math.min(1, Math.max(0, Math.exp(avgLogprobs))).toFixed(4));
+      confidence_source = 'provider_logprobs';
+    }
+
     return {
       text,
       input_tokens,
@@ -253,7 +279,8 @@ export class LLMClient {
       cost_usd,
       latency_ms,
       model,
-      logprob_confidence: 0.88,
+      ...(logprob_confidence !== undefined ? { logprob_confidence } : {}),
+      confidence_source,
       provider_source: 'gemini',
     };
   }
@@ -357,7 +384,7 @@ export class LLMClient {
       cost_usd,
       latency_ms,
       model,
-      logprob_confidence: 0.85,
+      confidence_source: 'unavailable',
       provider_source: 'mock_simulator',
     };
   }
