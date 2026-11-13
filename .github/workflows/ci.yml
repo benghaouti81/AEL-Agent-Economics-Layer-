@@ -41,3 +41,35 @@ jobs:
 
       - name: Build frontend distribution
         run: npm run build
+
+  verify-dod:
+    name: verify-dod
+    needs: test-and-lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22 LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run eval suites with threshold exit-code checks (a)
+        env:
+          AEL_ALLOW_MOCK: '1'
+        run: |
+          npx tsx bin/ael.ts eval --suite tool --db /tmp/verify_dod.db
+          npx tsx bin/ael.ts eval --suite budget --split held_out --db /tmp/verify_dod.db
+
+      - name: Run V8 coverage report for engines gate (e)
+        run: npm run test:coverage -- --coverage.reporter=text --coverage.reporter=json-summary
+
+      - name: Run verify-dod checks (a-e)
+        run: npm run verify:dod
+
