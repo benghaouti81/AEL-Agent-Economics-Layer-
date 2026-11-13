@@ -1,0 +1,89 @@
+name: AEL Live Evaluation (Gemini)
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  live-eval:
+    name: Live Gemini Evaluation (Budget Held-Out + Tool-DC)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22 LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Mask and validate GEMINI_API_KEY secret
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          if [ -z "$GEMINI_API_KEY" ]; then
+            echo "::error::GEMINI_API_KEY repository secret is missing."
+            exit 1
+          fi
+          echo "::add-mask::$GEMINI_API_KEY"
+
+      - name: Spending guard preflight (abort if projected cost > $1.00)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          AEL_LIVE_EVAL: '1'
+        run: npx tsx bin/ael.ts eval --suite all --split held_out --live --max-cost-usd 1.0 --preflight-only
+
+      - name: Run Thinking Budget suite live (held_out)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          AEL_LIVE_EVAL: '1'
+        run: npx tsx bin/ael.ts eval --suite budget --split held_out --live --max-cost-usd 1.0 --db /tmp/live_eval.db
+
+      - name: Run Tool-DC suite live
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          AEL_LIVE_EVAL: '1'
+        run: npx tsx bin/ael.ts eval --suite tool --live --max-cost-usd 1.0 --db /tmp/live_eval.db
+
+      - name: Verify live result files and provider_source
+        run: |
+          RUN_DATE=$(date -u +%Y-%m-%d)
+          node -e "
+            const fs = require('fs');
+            for (const f of ['evals/results/${RUN_DATE}_live_budget_held_out.json', 'evals/results/${RUN_DATE}_live_tool_selection.json']) {
+              if (!fs.existsSync(f)) throw new Error('Missing live result file: ' + f);
+              const data = JSON.parse(fs.readFileSync(f, 'utf8'));
+              if (data.provider_source !== 'gemini') {
+                throw new Error(f + ' has provider_source=' + data.provider_source + ' (expected gemini)');
+              }
+              console.log('Verified', f, 'provider_source=' + data.provider_source, 'status=' + data.acceptance_status);
+            }
+          "
+
+      - name: Commit live evaluation results
+        run: |
+          RUN_DATE=$(date -u +%Y-%m-%d)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add evals/results/${RUN_DATE}_live_*.json
+          if git diff --cached --quiet; then
+            echo "No changes to live evaluation result files."
+            exit 0
+          fi
+          git commit -m "eval(live): record Gemini live evaluation results (${RUN_DATE})"
+          if git symbolic-ref -q HEAD >/dev/null; then
+            git push
+          else
+            echo "Running on detached tag ref; skipping branch push."
+          fi

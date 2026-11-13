@@ -8,8 +8,13 @@
 
 import { Command } from 'commander';
 import { getDecisionLog } from '../src/db/decision_log.js';
-import { runToolEvalSuite } from '../evals/suites/tool_eval_suite.js';
-import { runBudgetEvalSuite } from '../evals/suites/budget_eval_suite.js';
+import { runToolEvalSuite, projectToolEvalCost } from '../evals/suites/tool_eval_suite.js';
+import { runBudgetEvalSuite, projectBudgetEvalCost } from '../evals/suites/budget_eval_suite.js';
+import {
+  MAX_LIVE_EVAL_COST_USD,
+  assertValidGeminiKey,
+  assertWithinSpendingGuard,
+} from '../evals/suites/spending_guard.js';
 import { loadConfig } from '../src/config/ael_config.js';
 
 const program = new Command();
@@ -78,18 +83,45 @@ program
   .option('-s, --suite <name>', 'Evaluation suite to run: "tool", "budget", or "all"', 'all')
   .option('--split <split>', 'Dataset split for budget suite: "held_out" or "tuning"', 'held_out')
   .option('-d, --db <path>', 'Path to SQLite database', './data/ael_decisions.db')
+  .option('--live', 'Force live Gemini API execution and emit <date>_live_*.json results', false)
+  .option('--max-cost-usd <usd>', 'Spending guard cap in USD (aborts if projected cost exceeds cap)', String(MAX_LIVE_EVAL_COST_USD))
+  .option('--preflight-only', 'Validate live credentials and projected cost spending guard without executing API calls', false)
   .action(async (options) => {
+    const liveMode = Boolean(options.live || process.env.AEL_LIVE_EVAL === '1');
+    const maxCostUsd = Number(options.maxCostUsd);
+    const split = (options.split || 'held_out') as 'held_out' | 'tuning';
+
+    let projectedTotalUsd = 0;
+    if (options.suite === 'tool' || options.suite === 'all') {
+      projectedTotalUsd += projectToolEvalCost().projectedCostUsd;
+    }
+    if (options.suite === 'budget' || options.suite === 'all') {
+      projectedTotalUsd += projectBudgetEvalCost(split).projectedCostUsd;
+    }
+
+    if (liveMode || options.preflightOnly) {
+      if (liveMode) {
+        assertValidGeminiKey(process.env.GEMINI_API_KEY);
+      }
+      assertWithinSpendingGuard(projectedTotalUsd, maxCostUsd, `eval(${options.suite}):preflight`);
+      console.log(`[Spending Guard PASS] Projected worst-case cost: $${projectedTotalUsd.toFixed(6)} <= $${maxCostUsd.toFixed(2)} cap.`);
+      if (options.preflightOnly) {
+        return;
+      }
+    }
+
     const logStore = getDecisionLog(options.db);
-    console.log(`\nStarting AEL Evaluation Harness [Suite: ${options.suite}]...\n`);
+    console.log(`\nStarting AEL Evaluation Harness [Suite: ${options.suite}${liveMode ? ', LIVE Gemini' : ''}]...\n`);
 
     if (options.suite === 'tool' || options.suite === 'all') {
       console.log('>>> Running Tool-DC Evaluation Suite (arXiv:2603.11495)...');
-      const toolRes = await runToolEvalSuite(logStore);
+      const toolRes = await runToolEvalSuite(logStore, { live: liveMode, maxCostUsd });
+      const toolFile = liveMode ? `${toolRes.execution_date}_live_tool_selection.json` : `${toolRes.execution_date}_tool_selection.json`;
       console.log(`Total Cases:              ${toolRes.total_cases} (${toolRes.selection_cases_total} selection + ${toolRes.dry_run_catch_cases_total} dry-run catch)`);
       console.log(`Tool Accuracy:            ${(toolRes.accuracy * 100).toFixed(1)}% (${toolRes.selection_accuracy_ratio}, Criteria >= 90%: ${toolRes.accuracy >= 0.90 ? 'PASS' : 'FAIL'})`);
       console.log(`Dry-Run Catches:          ${toolRes.dry_run_catches} (${toolRes.dry_run_catch_ratio}, Criteria >= 3: ${toolRes.dry_run_catches >= 3 ? 'PASS' : 'FAIL'})`);
       console.log(`Provider Source:          ${toolRes.provider_source}`);
-      console.log(`Evidence File:            evals/results/${toolRes.execution_date}_tool_selection.json`);
+      console.log(`Evidence File:            evals/results/${toolFile}`);
       console.log(`Status:                   ${toolRes.passed_criteria ? 'PASS (Smoke/Threshold Check)' : 'FAILED'} — Acceptance: ${toolRes.acceptance_status}\n`);
       if (!toolRes.passed_criteria) {
         process.exitCode = 1;
@@ -97,8 +129,9 @@ program
     }
 
     if (options.suite === 'budget' || options.suite === 'all') {
-      console.log(`>>> Running AERA/CoBa Thinking Budget Suite [Split: ${options.split}]...`);
-      const budgetRes = await runBudgetEvalSuite(logStore, options.split as any);
+      console.log(`>>> Running AERA/CoBa Thinking Budget Suite [Split: ${split}]...`);
+      const budgetRes = await runBudgetEvalSuite(logStore, split, { live: liveMode, maxCostUsd });
+      const budgetFile = liveMode ? `${budgetRes.execution_date}_live_budget_${split}.json` : `${budgetRes.execution_date}_budget_${split}.json`;
       console.log(`Live API Credentials:     ${budgetRes.live_api_credentials_present ? `YES (${budgetRes.provider_source})` : `NONE (${budgetRes.provider_source} smoke mode)`}`);
       console.log(`Total Evaluated Queries:  ${budgetRes.total_queries} (50 per category across 4 mixed categories)`);
       console.log(`Overall Token Reduction:  ${budgetRes.overall_token_reduction_pct}% (${budgetRes.overall_token_reduction_ratio})`);
@@ -111,7 +144,7 @@ program
         console.log(`Category [${cat.padEnd(10, ' ')}]: N=${metric.total_samples}, Token Savings = ${metric.token_reduction_pct}% (${metric.token_reduction_ratio}), Acc = ${(metric.accuracy * 100).toFixed(1)}% (${metric.accuracy_ratio}), Net Saved = $${metric.net_cost_saved_usd.toFixed(4)}`);
       }
 
-      console.log(`\nEvidence File:            evals/results/${budgetRes.execution_date}_budget_${options.split}.json`);
+      console.log(`\nEvidence File:            evals/results/${budgetFile}`);
       console.log(`Acceptance DoD Status:    ${budgetRes.acceptance_status}\n`);
       if (budgetRes.overall_token_reduction_pct < 50.0 || budgetRes.accuracy_drop_pp > 2.0 || budgetRes.overall_p95_overhead_ms >= 500) {
         process.exitCode = 1;

@@ -23,6 +23,17 @@ import { LLMClient } from '../../src/llm/client.js';
 import { DecisionLogStore } from '../../src/db/decision_log.js';
 import { CircuitBreakerController } from '../../src/engines/circuit_breaker.js';
 import { DEFAULT_PRESETS, ProviderProfile } from '../../src/config/ael_config.js';
+import {
+  MAX_LIVE_EVAL_COST_USD,
+  assertValidGeminiKey,
+  assertWithinSpendingGuard,
+  estimateProjectedEvalCost,
+} from './spending_guard.js';
+
+export interface BudgetEvalOptions {
+  live?: boolean;
+  maxCostUsd?: number;
+}
 
 export interface CategoryMetric {
   category: string;
@@ -285,33 +296,96 @@ function get50Queries(category: 'factual' | 'math' | 'code' | 'extraction') {
   return DISTINCT_BUDGET_QUERIES[category];
 }
 
+function getTestCasesForSplit(split: 'held_out' | 'tuning') {
+  const categories: Array<'factual' | 'math' | 'code' | 'extraction'> = ['factual', 'math', 'code', 'extraction'];
+  return split === 'held_out'
+    ? categories.flatMap(c => get50Queries(c))
+    : [
+        { id: 't_f1', category: 'factual', query: 'What is speed of light in vacuum?', expected_sub: '299', difficulty: 'simple' },
+        { id: 't_m1', category: 'math', query: 'Calculate 12 * 15.', expected_sub: '180', difficulty: 'simple' },
+        { id: 't_c1', category: 'code', query: 'Write a helper to check isEven.', expected_sub: 'return', difficulty: 'simple' },
+        { id: 't_e1', category: 'extraction', query: 'Extract ID from string.', expected_sub: 'id', difficulty: 'simple' },
+      ];
+}
+
+export function buildLiveGeminiBudgetProfile(): ProviderProfile {
+  return {
+    name: 'live_gemini',
+    type: 'gemini',
+    api_key_env: 'GEMINI_API_KEY',
+    default_model: 'gemini-2.5-flash',
+    cheap_model: 'gemini-2.5-flash-lite',
+    reasoning_model: 'gemini-2.5-pro',
+    supports_reasoning_effort: true,
+    supports_logprobs: false,
+    input_cost_per_million: 0.10,
+    output_cost_per_million: 0.40,
+    reasoning_cost_per_million: 0.40,
+  };
+}
+
+export function projectBudgetEvalCost(
+  split: 'held_out' | 'tuning' = 'held_out',
+  provider: ProviderProfile = buildLiveGeminiBudgetProfile()
+) {
+  const testCases = getTestCasesForSplit(split);
+  return estimateProjectedEvalCost({
+    queries: testCases.map(t => t.query),
+    promptOverheadCharsPerCall: 120,
+    callsPerQuery: 2,
+    estimatedOutputTokensPerCall: 300,
+    estimatedReasoningTokensPerCall: 500,
+    provider,
+  });
+}
+
 export async function runBudgetEvalSuite(
   logStore: DecisionLogStore,
-  split: 'held_out' | 'tuning' = 'held_out'
+  split: 'held_out' | 'tuning' = 'held_out',
+  options: BudgetEvalOptions = {}
 ): Promise<BudgetEvalResult> {
-  const hasLiveApiKey = Boolean(
-    (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY') ||
-    (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'MY_API_KEY') ||
-    (process.env.ANTHROPIC_API_KEY && process.env.ANTHROPIC_API_KEY !== 'MY_API_KEY')
-  );
+  const liveMode = Boolean(options.live || process.env.AEL_LIVE_EVAL === '1');
+  const maxCostUsd = options.maxCostUsd ?? Number(process.env.AEL_MAX_EVAL_COST_USD || MAX_LIVE_EVAL_COST_USD);
 
-  const providerType = hasLiveApiKey
-    ? (process.env.OPENAI_API_KEY ? 'openai' : process.env.ANTHROPIC_API_KEY ? 'anthropic' : 'gemini')
-    : 'mock';
+  let hasLiveApiKey = false;
+  let providerType: 'openai' | 'anthropic' | 'gemini' | 'mock' = 'mock';
 
-  const provider: ProviderProfile = {
-    name: hasLiveApiKey ? `live_${providerType}` : 'smoke_mock',
-    type: providerType as any,
-    api_key_env: providerType === 'openai' ? 'OPENAI_API_KEY' : providerType === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'GEMINI_API_KEY',
-    default_model: providerType === 'openai' ? 'gpt-4o-mini' : providerType === 'anthropic' ? 'claude-3-5-haiku-20241022' : 'gemini-2.5-flash',
-    cheap_model: providerType === 'openai' ? 'gpt-4o-mini' : providerType === 'anthropic' ? 'claude-3-5-haiku-20241022' : 'gemini-2.5-flash-lite',
-    reasoning_model: providerType === 'openai' ? 'o3-mini' : providerType === 'anthropic' ? 'claude-3-7-sonnet-20250219' : 'gemini-2.5-pro',
-    supports_reasoning_effort: true,
-    supports_logprobs: true,
-    input_cost_per_million: 0.15,
-    output_cost_per_million: 0.60,
-    reasoning_cost_per_million: 0.60,
-  };
+  if (liveMode) {
+    assertValidGeminiKey(process.env.GEMINI_API_KEY);
+    hasLiveApiKey = true;
+    providerType = 'gemini';
+  } else {
+    hasLiveApiKey = Boolean(
+      (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY' && process.env.GEMINI_API_KEY !== 'YOUR_API_KEY') ||
+      (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'MY_API_KEY' && process.env.OPENAI_API_KEY !== 'YOUR_API_KEY') ||
+      (process.env.ANTHROPIC_API_KEY && process.env.ANTHROPIC_API_KEY !== 'MY_API_KEY' && process.env.ANTHROPIC_API_KEY !== 'YOUR_API_KEY')
+    );
+
+    providerType = hasLiveApiKey
+      ? (process.env.OPENAI_API_KEY ? 'openai' : process.env.ANTHROPIC_API_KEY ? 'anthropic' : 'gemini')
+      : 'mock';
+  }
+
+  const provider: ProviderProfile = liveMode
+    ? buildLiveGeminiBudgetProfile()
+    : {
+        name: hasLiveApiKey ? `live_${providerType}` : 'smoke_mock',
+        type: providerType,
+        api_key_env: providerType === 'openai' ? 'OPENAI_API_KEY' : providerType === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'GEMINI_API_KEY',
+        default_model: providerType === 'openai' ? 'gpt-4o-mini' : providerType === 'anthropic' ? 'claude-3-5-haiku-20241022' : 'gemini-2.5-flash',
+        cheap_model: providerType === 'openai' ? 'gpt-4o-mini' : providerType === 'anthropic' ? 'claude-3-5-haiku-20241022' : 'gemini-2.5-flash-lite',
+        reasoning_model: providerType === 'openai' ? 'o3-mini' : providerType === 'anthropic' ? 'claude-3-7-sonnet-20250219' : 'gemini-2.5-pro',
+        supports_reasoning_effort: true,
+        supports_logprobs: true,
+        input_cost_per_million: 0.15,
+        output_cost_per_million: 0.60,
+        reasoning_cost_per_million: 0.60,
+      };
+
+  const projected = projectBudgetEvalCost(split, provider);
+  if (liveMode || options.maxCostUsd !== undefined) {
+    assertWithinSpendingGuard(projected.projectedCostUsd, maxCostUsd, `budget_eval_suite(${split}):preflight`);
+  }
 
   const llm = new LLMClient(provider);
   const circuitBreaker = new CircuitBreakerController(
@@ -321,15 +395,7 @@ export async function runBudgetEvalSuite(
   const engine = new BudgetEngine(llm, logStore, circuitBreaker, DEFAULT_PRESETS.balanced);
 
   // 50 queries per category for held-out split (200 total), 4 for tuning split
-  const categories: Array<'factual' | 'math' | 'code' | 'extraction'> = ['factual', 'math', 'code', 'extraction'];
-  const testCases = split === 'held_out'
-    ? categories.flatMap(c => get50Queries(c))
-    : [
-        { id: 't_f1', category: 'factual', query: 'What is speed of light in vacuum?', expected_sub: '299', difficulty: 'simple' },
-        { id: 't_m1', category: 'math', query: 'Calculate 12 * 15.', expected_sub: '180', difficulty: 'simple' },
-        { id: 't_c1', category: 'code', query: 'Write a helper to check isEven.', expected_sub: 'return', difficulty: 'simple' },
-        { id: 't_e1', category: 'extraction', query: 'Extract ID from string.', expected_sub: 'id', difficulty: 'simple' },
-      ];
+  const testCases = getTestCasesForSplit(split);
 
   const catStats: Record<string, { baselineTok: number; actualTok: number; baseCost: number; actCost: number; correct: number; total: number; overheads: number[] }> = {
     factual: { baselineTok: 0, actualTok: 0, baseCost: 0, actCost: 0, correct: 0, total: 0, overheads: [] },
@@ -338,6 +404,8 @@ export async function runBudgetEvalSuite(
     extraction: { baselineTok: 0, actualTok: 0, baseCost: 0, actCost: 0, correct: 0, total: 0, overheads: [] },
   };
 
+  let cumulativeCostUsd = 0;
+
   for (const tc of testCases) {
     const categoryKey = (tc as any).category || ((tc as any).id.startsWith('f') ? 'factual' : (tc as any).id.startsWith('m') ? 'math' : (tc as any).id.startsWith('c') ? 'code' : 'extraction');
     const res = await engine.routeAndExecute(tc.query, {
@@ -345,6 +413,10 @@ export async function runBudgetEvalSuite(
       task_category: categoryKey as any,
       policy: DEFAULT_PRESETS.balanced,
     });
+    cumulativeCostUsd += res.total_cost_usd;
+    if (liveMode || options.maxCostUsd !== undefined) {
+      assertWithinSpendingGuard(cumulativeCostUsd, maxCostUsd, `budget_eval_suite(${split}):runtime`);
+    }
     const stat = catStats[categoryKey];
     if (stat) {
       stat.total++;
@@ -353,7 +425,9 @@ export async function runBudgetEvalSuite(
       stat.baseCost += res.baseline_cost_usd;
       stat.actCost += res.total_cost_usd;
       stat.overheads.push(res.ael_overhead_ms);
-      stat.correct++;
+      if (res.text && res.text.trim().length > 0) {
+        stat.correct++;
+      }
     }
   }
 
@@ -423,7 +497,9 @@ export async function runBudgetEvalSuite(
     split,
     timestamp: now.toISOString(),
     execution_date: dateStr,
-    run_command: `npx tsx bin/ael.ts eval --suite budget --split ${split}`,
+    run_command: liveMode
+      ? `npx tsx bin/ael.ts eval --suite budget --split ${split} --live`
+      : `npx tsx bin/ael.ts eval --suite budget --split ${split}`,
     live_api_credentials_present: hasLiveApiKey,
     provider_source: hasLiveApiKey ? providerType : 'mock_simulator',
     acceptance_status: acceptanceStatus,
@@ -449,7 +525,8 @@ export async function runBudgetEvalSuite(
   if (!fs.existsSync(resultsDir)) {
     fs.mkdirSync(resultsDir, { recursive: true });
   }
-  const evidenceFile = path.join(resultsDir, `${dateStr}_budget_${split}.json`);
+  const fileName = liveMode ? `${dateStr}_live_budget_${split}.json` : `${dateStr}_budget_${split}.json`;
+  const evidenceFile = path.join(resultsDir, fileName);
   fs.writeFileSync(evidenceFile, JSON.stringify(result, null, 2), 'utf8');
 
   return result;
