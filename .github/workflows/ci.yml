@@ -30,9 +30,13 @@ jobs:
         run: npm test
 
       - name: Run Tool-DC Evaluation Suite
+        env:
+          AEL_ALLOW_MOCK: '1'
         run: npx tsx bin/ael.ts eval --suite tool
 
       - name: Run AERA/CoBa Budget Evaluation Suite (Held-Out Split)
+        env:
+          AEL_ALLOW_MOCK: '1'
         run: npx tsx bin/ael.ts eval --suite budget --split held_out
 
       - name: Build frontend distribution

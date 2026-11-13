@@ -47,9 +47,15 @@ async function main() {
   sandbox.registerExecutor('search', (name, args, isDryRun) => searchServer.execute(name, args, isDryRun));
   sandbox.registerExecutor('destructive', (name, args, isDryRun) => destructiveServer.execute(name, args, isDryRun));
 
+  const hasLiveGeminiKey = Boolean(
+    process.env.GEMINI_API_KEY &&
+    process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY' &&
+    process.env.GEMINI_API_KEY !== 'YOUR_API_KEY'
+  );
+
   const provider: ProviderProfile = {
-    name: 'demo_provider',
-    type: 'gemini',
+    name: hasLiveGeminiKey ? 'demo_provider' : 'demo_mock_provider',
+    type: hasLiveGeminiKey ? 'gemini' : 'mock',
     api_key_env: 'GEMINI_API_KEY',
     default_model: 'gemini-2.5-flash',
     cheap_model: 'gemini-2.5-flash-lite',

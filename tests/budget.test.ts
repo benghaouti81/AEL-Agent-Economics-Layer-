@@ -3,7 +3,7 @@
  * @license Apache-2.0
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { BudgetEngine } from '../src/engines/budget.js';
 import { CircuitBreakerController } from '../src/engines/circuit_breaker.js';
 import { LLMClient } from '../src/llm/client.js';
@@ -11,12 +11,14 @@ import { DecisionLogStore } from '../src/db/decision_log.js';
 import { DEFAULT_PRESETS } from '../src/config/ael_config.js';
 
 describe('Budget Engine & Circuit Breaker', () => {
+  const originalAllowMock = process.env.AEL_ALLOW_MOCK;
   let logStore: DecisionLogStore;
   let llm: LLMClient;
   let circuitBreaker: CircuitBreakerController;
   let engine: BudgetEngine;
 
   beforeEach(() => {
+    process.env.AEL_ALLOW_MOCK = '1';
     logStore = new DecisionLogStore(':memory:');
     llm = new LLMClient({
       name: 'mock',
@@ -36,6 +38,11 @@ describe('Budget Engine & Circuit Breaker', () => {
       logStore
     );
     engine = new BudgetEngine(llm, logStore, circuitBreaker, DEFAULT_PRESETS.balanced);
+  });
+
+  afterEach(() => {
+    if (originalAllowMock === undefined) delete process.env.AEL_ALLOW_MOCK;
+    else process.env.AEL_ALLOW_MOCK = originalAllowMock;
   });
 
   it('allocates cheap compute for simple queries and reports net savings', async () => {

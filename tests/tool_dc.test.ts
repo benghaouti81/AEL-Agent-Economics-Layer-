@@ -20,6 +20,7 @@ describe('Tool-DC Engine & Dry-Run Sandbox', () => {
   let engine: ToolDCEngine;
 
   beforeEach(() => {
+    process.env.AEL_ALLOW_MOCK = '1';
     registry = new ToolRegistry([...FILESYSTEM_TOOLS, ...DESTRUCTIVE_TOOLS]);
     sandbox = new DryRunSandbox();
     const fsServer = new MockFilesystemServer();

@@ -33,15 +33,16 @@ export interface LLMResponse {
 
 export class LLMClient {
   private geminiClient: GoogleGenAI | null = null;
+  private geminiInitError: Error | null = null;
 
   constructor(private profile: ProviderProfile) {
-    const apiKey = process.env[profile.api_key_env] || process.env.GEMINI_API_KEY;
-    if (apiKey && apiKey !== 'MY_GEMINI_API_KEY' && apiKey !== 'YOUR_API_KEY') {
-      if (profile.type === 'gemini') {
+    if (profile.type === 'gemini') {
+      const apiKey = process.env[profile.api_key_env] || process.env.GEMINI_API_KEY;
+      if (apiKey && apiKey !== 'MY_GEMINI_API_KEY' && apiKey !== 'YOUR_API_KEY') {
         try {
           this.geminiClient = new GoogleGenAI({ apiKey });
-        } catch (err) {
-          console.warn(`[AEL LLM] Failed to initialize GoogleGenAI:`, err);
+        } catch (err: any) {
+          this.geminiInitError = err instanceof Error ? err : new Error(String(err));
         }
       }
     }
@@ -60,34 +61,51 @@ export class LLMClient {
     }
 
     // 1. OpenAI-Compatible Adapter (/v1/chat/completions)
-    if (this.profile.type === 'openai' && apiKey && apiKey !== 'MY_API_KEY') {
-      try {
-        return await this.callOpenAI(prompt, model, options, apiKey, start);
-      } catch (err: any) {
-        console.warn(`[AEL LLM] OpenAI call failed, falling back to mock:`, err.message);
+    if (this.profile.type === 'openai') {
+      if (!apiKey || apiKey === 'MY_API_KEY' || apiKey === 'YOUR_API_KEY') {
+        throw new Error(
+          `[AEL LLM] Missing API key for OpenAI provider '${this.profile.name}' (env '${this.profile.api_key_env}').`
+        );
       }
+      return await this.callOpenAI(prompt, model, options, apiKey, start);
     }
 
     // 2. Anthropic-Style Adapter (/v1/messages)
-    if (this.profile.type === 'anthropic' && apiKey && apiKey !== 'MY_API_KEY') {
-      try {
-        return await this.callAnthropic(prompt, model, options, apiKey, start);
-      } catch (err: any) {
-        console.warn(`[AEL LLM] Anthropic call failed, falling back to mock:`, err.message);
+    if (this.profile.type === 'anthropic') {
+      if (!apiKey || apiKey === 'MY_API_KEY' || apiKey === 'YOUR_API_KEY') {
+        throw new Error(
+          `[AEL LLM] Missing API key for Anthropic provider '${this.profile.name}' (env '${this.profile.api_key_env}').`
+        );
       }
+      return await this.callAnthropic(prompt, model, options, apiKey, start);
     }
 
     // 3. Gemini Adapter (@google/genai)
-    if (this.profile.type === 'gemini' && this.geminiClient) {
-      try {
-        return await this.callGemini(prompt, model, options, start);
-      } catch (err: any) {
-        console.warn(`[AEL LLM] Gemini call failed, falling back to mock:`, err.message);
+    if (this.profile.type === 'gemini') {
+      if (this.geminiInitError) {
+        throw new Error(
+          `[AEL LLM] Gemini client initialization failed for provider '${this.profile.name}': ${this.geminiInitError.message}`
+        );
       }
+      if (!this.geminiClient) {
+        throw new Error(
+          `[AEL LLM] Missing or invalid Gemini API key for provider '${this.profile.name}' (env '${this.profile.api_key_env}').`
+        );
+      }
+      return await this.callGemini(prompt, model, options, start);
     }
 
-    // 4. Mock / Smoke-Test Simulator (Zero API key / Offline mode)
-    return this.mockGenerate(prompt, model, options, start);
+    // 4. Mock / Smoke-Test Simulator (Allowed ONLY with explicit AEL_ALLOW_MOCK=1 flag)
+    if (this.profile.type === 'mock') {
+      if (process.env.AEL_ALLOW_MOCK !== '1') {
+        throw new Error(
+          `[AEL LLM] Mock provider '${this.profile.name}' is disabled. Set AEL_ALLOW_MOCK=1 to run smoke tests or unit tests with mock_simulator.`
+        );
+      }
+      return this.mockGenerate(prompt, model, options, start);
+    }
+
+    throw new Error(`[AEL LLM] Unsupported provider type: '${String(this.profile.type)}'.`);
   }
 
   private async callOpenAI(

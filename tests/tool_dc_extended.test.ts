@@ -20,6 +20,7 @@ describe('Tool-DC Extended Features', () => {
   let engine: ToolDCEngine;
 
   beforeEach(() => {
+    process.env.AEL_ALLOW_MOCK = '1';
     registry = new ToolRegistry([...FILESYSTEM_TOOLS, ...SEARCH_TOOLS]);
     sandbox = new DryRunSandbox();
     const fs = new MockFilesystemServer();

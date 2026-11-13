@@ -22,6 +22,7 @@ describe('McpGateway Surface', () => {
   let logStore: DecisionLogStore;
 
   beforeEach(() => {
+    process.env.AEL_ALLOW_MOCK = '1';
     registry = new ToolRegistry([...FILESYSTEM_TOOLS, ...SEARCH_TOOLS, ...DESTRUCTIVE_TOOLS]);
     sandbox = new DryRunSandbox();
     const fs = new MockFilesystemServer();

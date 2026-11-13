@@ -19,6 +19,7 @@ describe('Circuit Breaker End-to-End Lifecycle (DoD #6)', () => {
   let engine: BudgetEngine;
 
   beforeEach(() => {
+    process.env.AEL_ALLOW_MOCK = '1';
     logStore = new DecisionLogStore(':memory:');
     llm = new LLMClient({
       name: 'mock',
