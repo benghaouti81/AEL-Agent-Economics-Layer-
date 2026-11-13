@@ -23,6 +23,8 @@ export interface ToolDCSelectionResult {
   error?: string;
   overhead_tokens: number;
   overhead_cost_usd: number;
+  baseline_tokens: number;
+  baseline_cost_usd: number;
 }
 
 export class ToolDCEngine {
@@ -34,6 +36,24 @@ export class ToolDCEngine {
     private llm: LLMClient,
     private logStore: DecisionLogStore
   ) {}
+
+  /**
+   * Runtime-measured baseline:
+   * Serializes the full tool-schema dump from the registry (exactly what a non-AEL agent would place into context).
+   * Token count uses standard documented approximation: Math.ceil(serialized.length / 4).
+   * Cost is derived dynamically from the active provider profile's input pricing via llm.calculateCost(tokens, 0, 0).
+   */
+  public computeRegistryBaseline(): { baselineTokens: number; baselineCostUsd: number } {
+    const allTools = this.registry.getAllTools();
+    if (allTools.length === 0) {
+      return { baselineTokens: 0, baselineCostUsd: 0 };
+    }
+    const serialized = JSON.stringify(allTools);
+    // Documented token approximation: 1 token ~= 4 characters of JSON serialized schema
+    const baselineTokens = Math.ceil(serialized.length / 4);
+    const baselineCostUsd = this.llm.calculateCost(baselineTokens, 0, 0);
+    return { baselineTokens, baselineCostUsd };
+  }
 
   public async selectAndExecute(
     taskQuery: string,
@@ -50,13 +70,16 @@ export class ToolDCEngine {
     const approval = options.human_approval_granted ?? false;
     const passThrough = options.pass_through ?? false;
 
+    // Runtime-measured baseline from current registry tool schemas
+    const { baselineTokens, baselineCostUsd } = this.computeRegistryBaseline();
+
     const schema_hash = this.registry.getSchemaHash();
     const query_hash = crypto.createHash('sha256').update(taskQuery).digest('hex').substring(0, 16);
     const cacheKey = `${query_hash}_${schema_hash}`;
 
     // Pass-through baseline: dump all tools into context, 1 attempt, no dry-run verification
     if (passThrough) {
-      return this.executePassThrough(taskQuery, workflow_id, query_hash, schema_hash, startTime, approval);
+      return this.executePassThrough(taskQuery, workflow_id, query_hash, schema_hash, startTime, approval, baselineTokens, baselineCostUsd);
     }
 
     // Check plan cache (schema_hash ensures instant invalidation on toolset update)
@@ -78,14 +101,14 @@ export class ToolDCEngine {
             dry_run_passed: true,
             dry_run_caught_error: null,
             human_approval_granted: approval,
-            baseline_tokens: 3500, // Cost of dumping 50+ tool schemas into context
+            baseline_tokens: baselineTokens,
             upstream_tokens: 0,
             ael_internal_tokens: 0,
-            net_tokens_saved: 3500,
-            baseline_cost_usd: 0.0035,
+            net_tokens_saved: baselineTokens,
+            baseline_cost_usd: baselineCostUsd,
             upstream_cost_usd: 0,
             ael_internal_cost_usd: 0,
-            net_cost_saved_usd: 0.0035,
+            net_cost_saved_usd: baselineCostUsd,
             latency_ms: Date.now() - startTime,
             ael_overhead_ms: 2,
             completed_successfully: execRes.success,
@@ -103,6 +126,8 @@ export class ToolDCEngine {
             error: execRes.error,
             overhead_tokens: 0,
             overhead_cost_usd: 0,
+            baseline_tokens: baselineTokens,
+            baseline_cost_usd: baselineCostUsd,
           };
         }
       }
@@ -121,6 +146,8 @@ export class ToolDCEngine {
         error: 'No candidate tools available in registry',
         overhead_tokens: 0,
         overhead_cost_usd: 0,
+        baseline_tokens: baselineTokens,
+        baseline_cost_usd: baselineCostUsd,
       };
     }
 
@@ -198,14 +225,14 @@ export class ToolDCEngine {
         dry_run_passed: false,
         dry_run_caught_error: dryRunCaughtError || lastError,
         human_approval_granted: approval,
-        baseline_tokens: 3500,
+        baseline_tokens: baselineTokens,
         upstream_tokens: 0,
         ael_internal_tokens: ael_overhead_tokens,
-        net_tokens_saved: Math.max(0, 3500 - ael_overhead_tokens),
-        baseline_cost_usd: 0.0035,
+        net_tokens_saved: Math.max(0, baselineTokens - ael_overhead_tokens),
+        baseline_cost_usd: baselineCostUsd,
         upstream_cost_usd: 0,
         ael_internal_cost_usd: ael_overhead_cost,
-        net_cost_saved_usd: Number((0.0035 - ael_overhead_cost).toFixed(6)),
+        net_cost_saved_usd: Number((baselineCostUsd - ael_overhead_cost).toFixed(6)),
         latency_ms: aelOverheadMs,
         ael_overhead_ms: aelOverheadMs,
         completed_successfully: false,
@@ -222,6 +249,8 @@ export class ToolDCEngine {
         error: lastError || 'Tool-DC retries exhausted without verified match',
         overhead_tokens: ael_overhead_tokens,
         overhead_cost_usd: ael_overhead_cost,
+        baseline_tokens: baselineTokens,
+        baseline_cost_usd: baselineCostUsd,
       };
     }
 
@@ -236,9 +265,7 @@ export class ToolDCEngine {
     const liveExec = await this.sandbox.executeLive(selectedTool, finalArgs, approval);
     const totalLatency = Date.now() - startTime;
 
-    // Baseline calculation: baseline dumps all 50+ tool schemas (~3,500 tokens)
-    const baselineTokens = 3500;
-    const baselineCostUsd = 0.0035;
+    // Baseline already measured from registry schemas & active provider pricing
     const netTokensSaved = Math.max(0, baselineTokens - ael_overhead_tokens);
     const netCostSaved = Number((baselineCostUsd - ael_overhead_cost).toFixed(6));
 
@@ -279,6 +306,8 @@ export class ToolDCEngine {
       error: liveExec.error,
       overhead_tokens: ael_overhead_tokens,
       overhead_cost_usd: ael_overhead_cost,
+      baseline_tokens: baselineTokens,
+      baseline_cost_usd: baselineCostUsd,
     };
   }
 
@@ -325,7 +354,9 @@ Output STRICT JSON ONLY in this format:
     query_hash: string,
     schema_hash: string,
     startTime: number,
-    approval: boolean
+    approval: boolean,
+    baselineTokens: number,
+    baselineCostUsd: number
   ): Promise<ToolDCSelectionResult> {
     // Pass-through: dumps all tools, 0 dry-run verification
     const allTools = this.registry.getAllTools();
@@ -341,9 +372,6 @@ Output STRICT JSON ONLY in this format:
 
     const tool = this.registry.getTool(parsed.tool);
     const execRes = tool ? await this.sandbox.executeLive(tool, parsed.arguments || {}, approval) : { success: false, error: 'No tool chosen' };
-
-    const baselineTokens = 3500;
-    const baselineCost = 0.0035;
 
     this.logDecision({
       workflow_id,
@@ -361,8 +389,8 @@ Output STRICT JSON ONLY in this format:
       upstream_tokens: baselineTokens,
       ael_internal_tokens: 0,
       net_tokens_saved: 0,
-      baseline_cost_usd: baselineCost,
-      upstream_cost_usd: baselineCost,
+      baseline_cost_usd: baselineCostUsd,
+      upstream_cost_usd: baselineCostUsd,
       ael_internal_cost_usd: 0,
       net_cost_saved_usd: 0,
       latency_ms: Date.now() - startTime,
@@ -382,6 +410,8 @@ Output STRICT JSON ONLY in this format:
       error: execRes.error,
       overhead_tokens: 0,
       overhead_cost_usd: 0,
+      baseline_tokens: baselineTokens,
+      baseline_cost_usd: baselineCostUsd,
     };
   }
 

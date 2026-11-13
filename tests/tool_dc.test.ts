@@ -75,4 +75,40 @@ describe('Tool-DC Engine & Dry-Run Sandbox', () => {
     expect(dryRun.passed).toBe(false);
     expect(dryRun.error).toContain('FileNotFoundError');
   });
+
+  it('computes baseline_tokens and baseline_cost_usd dynamically from registry schemas and provider pricing', async () => {
+    const expectedTokens1 = Math.ceil(JSON.stringify(registry.getAllTools()).length / 4);
+    const expectedCost1 = llm.calculateCost(expectedTokens1, 0, 0);
+
+    const res1 = await engine.selectAndExecute('Read the contents of /workspace/README.md');
+    expect(res1.baseline_tokens).toBe(expectedTokens1);
+    expect(res1.baseline_cost_usd).toBe(expectedCost1);
+
+    registry.registerTool({
+      name: 'extra_analytics_query',
+      description: 'Run a comprehensive multi-table aggregation across historical telemetry logs for auditing.',
+      parameters: {
+        type: 'object',
+        properties: {
+          start_date: { type: 'string', description: 'ISO 8601 start date' },
+          end_date: { type: 'string', description: 'ISO 8601 end date' },
+        },
+        required: ['start_date', 'end_date'],
+      },
+      server: 'analytics',
+      dry_run_support: 'simulated',
+      side_effect: 'none',
+      reversible: true,
+      requires_human_approval: false,
+    });
+
+    const expectedTokens2 = Math.ceil(JSON.stringify(registry.getAllTools()).length / 4);
+    const expectedCost2 = llm.calculateCost(expectedTokens2, 0, 0);
+
+    const res2 = await engine.selectAndExecute('Read the contents of /workspace/README.md');
+    expect(expectedTokens2).toBeGreaterThan(expectedTokens1);
+    expect(res2.baseline_tokens).toBe(expectedTokens2);
+    expect(res2.baseline_cost_usd).toBe(expectedCost2);
+    expect(res2.baseline_cost_usd).toBeGreaterThan(res1.baseline_cost_usd);
+  });
 });
