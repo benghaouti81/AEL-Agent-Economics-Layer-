@@ -10,6 +10,8 @@ import { ToolRecord } from '../models/contracts.js';
 export interface DryRunResult {
   executed: boolean;
   passed: boolean;
+  schema_validation?: boolean;
+  reason?: string;
   mode: 'real_execution' | 'simulated' | 'schema_only';
   output?: any;
   error?: string;
@@ -45,7 +47,9 @@ export class DryRunSandbox {
     if (isMutating) {
       return {
         executed: false,
-        passed: true, // Schema check passed
+        passed: false,
+        schema_validation: true,
+        reason: 'not_executed_dry_run_unsupported',
         mode: 'schema_only',
         output: {
           notice: `Tool '${tool.name}' is mutating with dry_run_support='${tool.dry_run_support}'. Real execution blocked during dry-run.`,

@@ -121,7 +121,7 @@ export async function runToolEvalSuite(logStore: DecisionLogStore): Promise<Tool
       actual_tool: res.tool_name,
       passed,
       retries: res.retries,
-      dry_run_caught: Boolean(res.dry_run && !res.dry_run.passed),
+      dry_run_caught: Boolean(res.dry_run && res.dry_run.executed && !res.dry_run.passed),
       error: res.error,
     });
   }

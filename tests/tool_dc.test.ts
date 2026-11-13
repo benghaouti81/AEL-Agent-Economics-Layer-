@@ -56,6 +56,9 @@ describe('Tool-DC Engine & Dry-Run Sandbox', () => {
     const mutatingTool = registry.getTool('fin_transfer_funds')!;
     const dryRun = await sandbox.evaluateDryRun(mutatingTool, { source_account: '1', target_account: '2', amount_usd: 10 }, false);
     expect(dryRun.executed).toBe(false);
+    expect(dryRun.passed).toBe(false);
+    expect(dryRun.schema_validation).toBe(true);
+    expect(dryRun.reason).toBe('not_executed_dry_run_unsupported');
     expect(dryRun.mode).toBe('schema_only');
   });
 

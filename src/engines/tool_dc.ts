@@ -278,7 +278,7 @@ export class ToolDCEngine {
       tool_args_hash: crypto.createHash('sha256').update(JSON.stringify(finalArgs)).digest('hex').substring(0, 12),
       retries_count: retries,
       dry_run_executed: dryRunResult ? dryRunResult.executed : false,
-      dry_run_passed: dryRunResult ? dryRunResult.passed : true,
+      dry_run_passed: dryRunResult ? (dryRunResult.executed ? dryRunResult.passed : null) : true,
       dry_run_caught_error: dryRunCaughtError,
       human_approval_granted: approval,
       baseline_tokens: baselineTokens,
