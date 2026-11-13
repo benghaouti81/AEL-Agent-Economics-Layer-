@@ -85,30 +85,37 @@ program
     if (options.suite === 'tool' || options.suite === 'all') {
       console.log('>>> Running Tool-DC Evaluation Suite (arXiv:2603.11495)...');
       const toolRes = await runToolEvalSuite(logStore);
-      console.log(`Total Cases:              ${toolRes.total_cases}`);
-      console.log(`Tool Accuracy:            ${(toolRes.accuracy * 100).toFixed(1)}% (Criteria >= 90%: ${toolRes.accuracy >= 0.90 ? 'PASS' : 'FAIL'})`);
-      console.log(`Dry-Run Catches:          ${toolRes.dry_run_catches} (Criteria >= 3: ${toolRes.dry_run_catches >= 3 ? 'PASS' : 'FAIL'})`);
+      console.log(`Total Cases:              ${toolRes.total_cases} (${toolRes.selection_cases_total} selection + ${toolRes.dry_run_catch_cases_total} dry-run catch)`);
+      console.log(`Tool Accuracy:            ${(toolRes.accuracy * 100).toFixed(1)}% (${toolRes.selection_accuracy_ratio}, Criteria >= 90%: ${toolRes.accuracy >= 0.90 ? 'PASS' : 'FAIL'})`);
+      console.log(`Dry-Run Catches:          ${toolRes.dry_run_catches} (${toolRes.dry_run_catch_ratio}, Criteria >= 3: ${toolRes.dry_run_catches >= 3 ? 'PASS' : 'FAIL'})`);
+      console.log(`Provider Source:          ${toolRes.provider_source}`);
       console.log(`Evidence File:            evals/results/${toolRes.execution_date}_tool_selection.json`);
-      console.log(`Status:                   ${toolRes.passed_criteria ? 'PASS (Tool-DC FSM Verified)' : 'FAILED'}\n`);
+      console.log(`Status:                   ${toolRes.passed_criteria ? 'PASS (Smoke/Threshold Check)' : 'FAILED'} — Acceptance: ${toolRes.acceptance_status}\n`);
+      if (!toolRes.passed_criteria) {
+        process.exitCode = 1;
+      }
     }
 
     if (options.suite === 'budget' || options.suite === 'all') {
       console.log(`>>> Running AERA/CoBa Thinking Budget Suite [Split: ${options.split}]...`);
       const budgetRes = await runBudgetEvalSuite(logStore, options.split as any);
-      console.log(`Live API Credentials:     ${budgetRes.live_api_credentials_present ? `YES (${budgetRes.provider_source})` : 'NONE (Plumbing/smoke test mode)'}`);
+      console.log(`Live API Credentials:     ${budgetRes.live_api_credentials_present ? `YES (${budgetRes.provider_source})` : `NONE (${budgetRes.provider_source} smoke mode)`}`);
       console.log(`Total Evaluated Queries:  ${budgetRes.total_queries} (50 per category across 4 mixed categories)`);
-      console.log(`Overall Token Reduction:  ${budgetRes.overall_token_reduction_pct}%`);
-      console.log(`Accuracy Delta:           ${budgetRes.accuracy_drop_pp} pp`);
-      console.log(`p95 Decision Overhead:    ${budgetRes.overall_p95_overhead_ms} ms (Criteria < 500ms: PASS)`);
+      console.log(`Overall Token Reduction:  ${budgetRes.overall_token_reduction_pct}% (${budgetRes.overall_token_reduction_ratio})`);
+      console.log(`Accuracy Delta:           ${budgetRes.accuracy_drop_pp} pp (${budgetRes.overall_accuracy_ratio})`);
+      console.log(`p95 Decision Overhead:    ${budgetRes.overall_p95_overhead_ms} ms (Criteria < 500ms: ${budgetRes.overall_p95_overhead_ms < 500 ? 'PASS' : 'FAIL'})`);
       console.log(`Net Cost Saved (USD):     $${budgetRes.overall_net_savings_usd.toFixed(4)}`);
       
       console.log('\n--- Breakdown per Category (50 queries each) ---');
       for (const [cat, metric] of Object.entries(budgetRes.categories)) {
-        console.log(`Category [${cat.padEnd(10, ' ')}]: N=${metric.total_samples}, Token Savings = ${metric.token_reduction_pct}%, Acc = ${(metric.accuracy * 100).toFixed(1)}%, Net Saved = $${metric.net_cost_saved_usd.toFixed(4)}`);
+        console.log(`Category [${cat.padEnd(10, ' ')}]: N=${metric.total_samples}, Token Savings = ${metric.token_reduction_pct}% (${metric.token_reduction_ratio}), Acc = ${(metric.accuracy * 100).toFixed(1)}% (${metric.accuracy_ratio}), Net Saved = $${metric.net_cost_saved_usd.toFixed(4)}`);
       }
 
       console.log(`\nEvidence File:            evals/results/${budgetRes.execution_date}_budget_${options.split}.json`);
       console.log(`Acceptance DoD Status:    ${budgetRes.acceptance_status}\n`);
+      if (budgetRes.overall_token_reduction_pct < 50.0 || budgetRes.accuracy_drop_pp > 2.0 || budgetRes.overall_p95_overhead_ms >= 500) {
+        process.exitCode = 1;
+      }
     }
   });
 

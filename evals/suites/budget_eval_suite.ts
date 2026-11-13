@@ -17,6 +17,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { BudgetEngine } from '../../src/engines/budget.js';
 import { LLMClient } from '../../src/llm/client.js';
 import { DecisionLogStore } from '../../src/db/decision_log.js';
@@ -28,10 +29,12 @@ export interface CategoryMetric {
   total_samples: number;
   baseline_tokens: number;
   actual_tokens: number;
+  token_reduction_ratio: string;
   token_reduction_pct: number;
   baseline_cost_usd: number;
   actual_cost_usd: number;
   net_cost_saved_usd: number;
+  accuracy_ratio: string;
   accuracy: number;
   baseline_accuracy: number;
   accuracy_delta_pp: number;
@@ -51,8 +54,14 @@ export interface BudgetEvalResult {
     | 'NOT VALIDATED (No live upstream API credentials configured)'
     | 'NOT VALIDATED (Thresholds not reached)';
   total_queries: number;
+  overall_baseline_tokens: number;
+  overall_actual_tokens: number;
+  overall_token_reduction_ratio: string;
   overall_token_reduction_pct: number;
   overall_net_savings_usd: number;
+  usd_per_task_baseline: number;
+  usd_per_task_ael: number;
+  overall_accuracy_ratio: string;
   overall_accuracy: number;
   baseline_accuracy: number;
   accuracy_drop_pp: number;
@@ -365,17 +374,19 @@ export async function runBudgetEvalSuite(
     const accDelta = Number(((acc - baselineAcc) * 100).toFixed(1));
 
     stat.overheads.sort((a, b) => a - b);
-    const p95 = stat.overheads[Math.floor(stat.overheads.length * 0.95)] || 12;
+    const p95 = stat.overheads[Math.floor(stat.overheads.length * 0.95)] ?? 0;
 
     categoryResults[cat] = {
       category: cat,
       total_samples: stat.total,
       baseline_tokens: stat.baselineTok,
       actual_tokens: stat.actualTok,
+      token_reduction_ratio: `${stat.baselineTok - stat.actualTok}/${stat.baselineTok}`,
       token_reduction_pct: Number(tokenReduct.toFixed(1)),
       baseline_cost_usd: Number(stat.baseCost.toFixed(5)),
       actual_cost_usd: Number(stat.actCost.toFixed(5)),
       net_cost_saved_usd: netSavedUsd,
+      accuracy_ratio: `${stat.correct}/${stat.total}`,
       accuracy: acc,
       baseline_accuracy: baselineAcc,
       accuracy_delta_pp: accDelta,
@@ -391,9 +402,11 @@ export async function runBudgetEvalSuite(
   }
 
   allOverheads.sort((a, b) => a - b);
-  const overallP95 = allOverheads[Math.floor(allOverheads.length * 0.95)] || 12;
+  const overallP95 = allOverheads[Math.floor(allOverheads.length * 0.95)] ?? 0;
   const overallTokenReduct = Math.max(0, ((totalBaseTok - totalActTok) / totalBaseTok) * 100);
   const overallNetSavings = Number((totalBaseCost - totalActCost).toFixed(5));
+  const usdPerTaskBaseline = Number((totalBaseCost / testCases.length).toFixed(5));
+  const usdPerTaskAel = Number((totalActCost / testCases.length).toFixed(5));
   const overallAcc = totalCorrect / testCases.length;
   const baselineOverallAcc = 0.96;
   const accuracyDropPp = Math.max(0, Number(((baselineOverallAcc - overallAcc) * 100).toFixed(1)));
@@ -412,11 +425,17 @@ export async function runBudgetEvalSuite(
     execution_date: dateStr,
     run_command: `npx tsx bin/ael.ts eval --suite budget --split ${split}`,
     live_api_credentials_present: hasLiveApiKey,
-    provider_source: provider.name,
+    provider_source: hasLiveApiKey ? providerType : 'mock_simulator',
     acceptance_status: acceptanceStatus,
     total_queries: testCases.length,
+    overall_baseline_tokens: totalBaseTok,
+    overall_actual_tokens: totalActTok,
+    overall_token_reduction_ratio: `${totalBaseTok - totalActTok}/${totalBaseTok}`,
     overall_token_reduction_pct: Number(overallTokenReduct.toFixed(1)),
     overall_net_savings_usd: overallNetSavings,
+    usd_per_task_baseline: usdPerTaskBaseline,
+    usd_per_task_ael: usdPerTaskAel,
+    overall_accuracy_ratio: `${totalCorrect}/${testCases.length}`,
     overall_accuracy: overallAcc,
     baseline_accuracy: baselineOverallAcc,
     accuracy_drop_pp: accuracyDropPp,
@@ -425,7 +444,8 @@ export async function runBudgetEvalSuite(
   };
 
   // Persist evidence JSON to evals/results/
-  const resultsDir = path.resolve(process.cwd(), 'evals', 'results');
+  const suiteDir = path.dirname(fileURLToPath(import.meta.url));
+  const resultsDir = path.resolve(suiteDir, '..', 'results');
   if (!fs.existsSync(resultsDir)) {
     fs.mkdirSync(resultsDir, { recursive: true });
   }

@@ -9,6 +9,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { ToolRegistry } from '../../src/mcp/registry.js';
 import { DryRunSandbox } from '../../src/mcp/sandbox.js';
 import { ToolDCEngine } from '../../src/engines/tool_dc.js';
@@ -21,14 +22,26 @@ import { ProviderProfile } from '../../src/config/ael_config.js';
 
 export interface ToolEvalResult {
   suite_name: string;
-  execution_date?: string;
-  run_command?: string;
+  execution_date: string;
+  run_command: string;
+  live_api_credentials_present: boolean;
+  provider_source: string;
+  acceptance_status:
+    | 'PASS'
+    | 'NOT VALIDATED (No live upstream API credentials configured)'
+    | 'NOT VALIDATED (Thresholds not reached)';
   total_cases: number;
+  selection_cases_total: number;
   successful_selections: number;
+  selection_accuracy_ratio: string;
   accuracy: number;
+  average_retries: number;
+  dry_run_catch_cases_total: number;
   dry_run_catches: number;
+  dry_run_catch_ratio: string;
   passed_criteria: boolean;
   cases: Array<{
+    case_type: 'selection' | 'dry_run_catch';
     query: string;
     expected_tool: string;
     actual_tool: string | null;
@@ -55,13 +68,27 @@ export async function runToolEvalSuite(logStore: DecisionLogStore): Promise<Tool
   sandbox.registerExecutor('search', (name, args, isDryRun) => searchServer.execute(name, args, isDryRun));
   sandbox.registerExecutor('destructive', (name, args, isDryRun) => destructiveServer.execute(name, args, isDryRun));
 
-  const mockProvider: ProviderProfile = {
-    name: 'eval_mock',
-    type: 'mock',
-    api_key_env: 'GEMINI_API_KEY',
-    default_model: 'mock-model',
-    cheap_model: 'mock-model',
-    reasoning_model: 'mock-model',
+  const hasLiveApiKey = Boolean(
+    (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY' && process.env.GEMINI_API_KEY !== 'YOUR_API_KEY') ||
+    (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'MY_API_KEY' && process.env.OPENAI_API_KEY !== 'YOUR_API_KEY') ||
+    (process.env.ANTHROPIC_API_KEY && process.env.ANTHROPIC_API_KEY !== 'MY_API_KEY' && process.env.ANTHROPIC_API_KEY !== 'YOUR_API_KEY')
+  );
+
+  const providerType = hasLiveApiKey
+    ? (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'MY_API_KEY'
+        ? 'openai'
+        : process.env.ANTHROPIC_API_KEY && process.env.ANTHROPIC_API_KEY !== 'MY_API_KEY'
+          ? 'anthropic'
+          : 'gemini')
+    : 'mock';
+
+  const provider: ProviderProfile = {
+    name: hasLiveApiKey ? `live_${providerType}` : 'eval_mock',
+    type: providerType as any,
+    api_key_env: providerType === 'openai' ? 'OPENAI_API_KEY' : providerType === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'GEMINI_API_KEY',
+    default_model: providerType === 'openai' ? 'gpt-4o-mini' : providerType === 'anthropic' ? 'claude-3-5-haiku-20241022' : providerType === 'gemini' ? 'gemini-2.5-flash' : 'mock-model',
+    cheap_model: providerType === 'openai' ? 'gpt-4o-mini' : providerType === 'anthropic' ? 'claude-3-5-haiku-20241022' : providerType === 'gemini' ? 'gemini-2.5-flash-lite' : 'mock-model',
+    reasoning_model: providerType === 'openai' ? 'o3-mini' : providerType === 'anthropic' ? 'claude-3-7-sonnet-20250219' : providerType === 'gemini' ? 'gemini-2.5-pro' : 'mock-model',
     supports_reasoning_effort: true,
     supports_logprobs: false,
     input_cost_per_million: 0.10,
@@ -69,7 +96,7 @@ export async function runToolEvalSuite(logStore: DecisionLogStore): Promise<Tool
     reasoning_cost_per_million: 0.40,
   };
 
-  const llm = new LLMClient(mockProvider);
+  const llm = new LLMClient(provider);
   const toolDc = new ToolDCEngine(registry, sandbox, llm, logStore);
 
   const testCases = [
@@ -103,9 +130,10 @@ export async function runToolEvalSuite(logStore: DecisionLogStore): Promise<Tool
 
   const results: ToolEvalResult['cases'] = [];
   let successfulCount = 0;
+  let totalSelectionRetries = 0;
   let dryRunCatches = 0;
 
-  // Run standard test cases
+  // Run standard selection test cases (10 cases)
   for (const tc of testCases) {
     const approval = tc.expected_tool === 'fin_transfer_funds';
     const res = await toolDc.selectAndExecute(tc.query, {
@@ -114,8 +142,10 @@ export async function runToolEvalSuite(logStore: DecisionLogStore): Promise<Tool
     });
     const passed = res.success && res.tool_name === tc.expected_tool;
     if (passed) successfulCount++;
+    totalSelectionRetries += res.retries;
 
     results.push({
+      case_type: 'selection',
       query: tc.query,
       expected_tool: tc.expected_tool,
       actual_tool: res.tool_name,
@@ -126,7 +156,8 @@ export async function runToolEvalSuite(logStore: DecisionLogStore): Promise<Tool
     });
   }
 
-  // Run dry-run safety catch scenarios
+  // Run dry-run safety catch scenarios (3 cases)
+  const { baselineTokens, baselineCostUsd } = toolDc.computeRegistryBaseline();
   for (const cs of catchScenarios) {
     let badTool: string = 'fs_read_file';
     let badArgs: Record<string, any> = { path: '/workspace/ghost_file.txt' };
@@ -140,8 +171,10 @@ export async function runToolEvalSuite(logStore: DecisionLogStore): Promise<Tool
     }
 
     const tool = registry.getTool(badTool)!;
+    const checkStart = performance.now();
     const dryRun = await sandbox.evaluateDryRun(tool, badArgs, false);
-    
+    const measuredOverheadMs = Math.max(0, Math.round(performance.now() - checkStart));
+
     if (dryRun.executed && !dryRun.passed) {
       dryRunCatches++;
       logStore.insertDecision({
@@ -157,18 +190,19 @@ export async function runToolEvalSuite(logStore: DecisionLogStore): Promise<Tool
         dry_run_passed: false,
         dry_run_caught_error: dryRun.error || 'Fault caught during dry-run',
         completed_successfully: false,
-        baseline_tokens: 3500,
+        baseline_tokens: baselineTokens,
         upstream_tokens: 0,
-        ael_internal_tokens: 200,
-        net_tokens_saved: 3300,
-        baseline_cost_usd: 0.0035,
+        ael_internal_tokens: 0,
+        net_tokens_saved: baselineTokens,
+        baseline_cost_usd: baselineCostUsd,
         upstream_cost_usd: 0,
-        ael_internal_cost_usd: 0.0002,
-        net_cost_saved_usd: 0.0033,
-        latency_ms: 12,
-        ael_overhead_ms: 8,
+        ael_internal_cost_usd: 0,
+        net_cost_saved_usd: baselineCostUsd,
+        latency_ms: measuredOverheadMs,
+        ael_overhead_ms: measuredOverheadMs,
       } as any);
       results.push({
+        case_type: 'dry_run_catch',
         query: cs.query,
         expected_tool: badTool,
         actual_tool: badTool,
@@ -177,29 +211,56 @@ export async function runToolEvalSuite(logStore: DecisionLogStore): Promise<Tool
         dry_run_caught: true,
         error: dryRun.error,
       });
+    } else {
+      results.push({
+        case_type: 'dry_run_catch',
+        query: cs.query,
+        expected_tool: badTool,
+        actual_tool: badTool,
+        passed: false,
+        retries: 1,
+        dry_run_caught: false,
+        error: dryRun.error || 'Expected dry-run catch did not trigger',
+      });
     }
   }
 
   const totalCases = results.length;
-  const accuracy = Number((successfulCount / testCases.length).toFixed(3));
-  const passed_criteria = accuracy >= 0.90 && dryRunCatches >= 3;
+  const selectionCasesTotal = testCases.length;
+  const dryRunCatchCasesTotal = catchScenarios.length;
+  const accuracy = Number((successfulCount / selectionCasesTotal).toFixed(3));
+  const averageRetries = Number((totalSelectionRetries / selectionCasesTotal).toFixed(2));
+  const passedThresholds = accuracy >= 0.90 && dryRunCatches >= 3;
+  const providerSource = hasLiveApiKey ? providerType : 'mock_simulator';
+  const acceptanceStatus = hasLiveApiKey
+    ? (passedThresholds ? 'PASS' : 'NOT VALIDATED (Thresholds not reached)')
+    : 'NOT VALIDATED (No live upstream API credentials configured)';
 
   const now = new Date();
   const dateStr = now.toISOString().split('T')[0];
 
-  const evalResult = {
+  const evalResult: ToolEvalResult = {
     suite_name: 'Tool-DC Verification & Safety Suite',
     execution_date: dateStr,
     run_command: 'npx tsx bin/ael.ts eval --suite tool',
+    live_api_credentials_present: hasLiveApiKey,
+    provider_source: providerSource,
+    acceptance_status: acceptanceStatus,
     total_cases: totalCases,
+    selection_cases_total: selectionCasesTotal,
     successful_selections: successfulCount,
+    selection_accuracy_ratio: `${successfulCount}/${selectionCasesTotal}`,
     accuracy,
+    average_retries: averageRetries,
+    dry_run_catch_cases_total: dryRunCatchCasesTotal,
     dry_run_catches: dryRunCatches,
-    passed_criteria,
+    dry_run_catch_ratio: `${dryRunCatches}/${dryRunCatchCasesTotal}`,
+    passed_criteria: passedThresholds,
     cases: results,
   };
 
-  const resultsDir = path.resolve(process.cwd(), 'evals', 'results');
+  const suiteDir = path.dirname(fileURLToPath(import.meta.url));
+  const resultsDir = path.resolve(suiteDir, '..', 'results');
   if (!fs.existsSync(resultsDir)) {
     fs.mkdirSync(resultsDir, { recursive: true });
   }
