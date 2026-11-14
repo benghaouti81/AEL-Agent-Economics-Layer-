@@ -19,6 +19,15 @@ export const ProviderProfileSchema = z.object({
   reasoning_model: z.string(),
   supports_reasoning_effort: z.boolean().default(true),
   supports_logprobs: z.boolean().default(false),
+  gemini_thinking_mode: z.enum(['budget', 'level']).optional(),
+  gemini_thinking_budgets: z
+    .object({
+      none: z.number().int().min(0).optional(),
+      low: z.number().int().min(-1).optional(),
+      medium: z.number().int().min(-1).optional(),
+      high: z.number().int().min(-1).optional(),
+    })
+    .optional(),
   // Pricing per 1M tokens in USD
   input_cost_per_million: z.number().default(0.15),
   output_cost_per_million: z.number().default(0.60),

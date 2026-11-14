@@ -276,4 +276,129 @@ describe('LLMClient Adapter Layer', () => {
     expect(res.total_tokens).toBeGreaterThan(0);
     expect(res.provider_source).toBe('mock_simulator');
   });
+
+  it('wires reasoning_effort to Gemini thinkingConfig.thinkingBudget (Gemini 2.5) and thinkingLevel per provider profile (P0-17)', async () => {
+    process.env.GEMINI_API_KEY = 'gem-test-123';
+    try {
+      // 1. Default Gemini 2.5 Flash profile uses thinkingBudget across all effort levels
+      const geminiBudgetClient = new LLMClient({
+        name: 'gemini_25_budget',
+        type: 'gemini',
+        api_key_env: 'GEMINI_API_KEY',
+        default_model: 'gemini-2.5-flash',
+        cheap_model: 'gemini-2.5-flash-lite',
+        reasoning_model: 'gemini-2.5-pro',
+        supports_reasoning_effort: true,
+        supports_logprobs: false,
+        input_cost_per_million: 0.10,
+        output_cost_per_million: 0.40,
+        reasoning_cost_per_million: 0.40,
+      });
+      const budgetSpy = vi.fn().mockResolvedValue({
+        text: 'ok',
+        usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 2 },
+      });
+      (geminiBudgetClient as any).geminiClient = { models: { generateContent: budgetSpy } };
+
+      await geminiBudgetClient.complete('q0', { reasoning_effort: 'none' });
+      await geminiBudgetClient.complete('q1', { reasoning_effort: 'low' });
+      await geminiBudgetClient.complete('q2', { reasoning_effort: 'medium' });
+      await geminiBudgetClient.complete('q3', { reasoning_effort: 'high' });
+
+      expect(budgetSpy.mock.calls[0][0].config.thinkingConfig).toEqual({ thinkingBudget: 0 });
+      expect(budgetSpy.mock.calls[1][0].config.thinkingConfig).toEqual({ thinkingBudget: 512 });
+      expect(budgetSpy.mock.calls[2][0].config.thinkingConfig).toEqual({ thinkingBudget: 2048 });
+      expect(budgetSpy.mock.calls[3][0].config.thinkingConfig).toEqual({ thinkingBudget: 8192 });
+
+      // Strictly increasing budgets across effort ladder
+      expect(budgetSpy.mock.calls[0][0].config.thinkingConfig.thinkingBudget)
+        .toBeLessThan(budgetSpy.mock.calls[1][0].config.thinkingConfig.thinkingBudget);
+      expect(budgetSpy.mock.calls[1][0].config.thinkingConfig.thinkingBudget)
+        .toBeLessThan(budgetSpy.mock.calls[2][0].config.thinkingConfig.thinkingBudget);
+      expect(budgetSpy.mock.calls[2][0].config.thinkingConfig.thinkingBudget)
+        .toBeLessThan(budgetSpy.mock.calls[3][0].config.thinkingConfig.thinkingBudget);
+
+      // 2. Profile with custom gemini_thinking_budgets overrides defaults
+      const customBudgetClient = new LLMClient({
+        name: 'gemini_custom_budget',
+        type: 'gemini',
+        api_key_env: 'GEMINI_API_KEY',
+        default_model: 'gemini-2.5-flash',
+        cheap_model: 'gemini-2.5-flash-lite',
+        reasoning_model: 'gemini-2.5-pro',
+        supports_reasoning_effort: true,
+        supports_logprobs: false,
+        gemini_thinking_budgets: { low: 256, high: 4096 },
+        input_cost_per_million: 0.10,
+        output_cost_per_million: 0.40,
+        reasoning_cost_per_million: 0.40,
+      });
+      const customSpy = vi.fn().mockResolvedValue({
+        text: 'ok',
+        usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 2 },
+      });
+      (customBudgetClient as any).geminiClient = { models: { generateContent: customSpy } };
+
+      await customBudgetClient.complete('q_custom_low', { reasoning_effort: 'low' });
+      await customBudgetClient.complete('q_custom_high', { reasoning_effort: 'high' });
+      expect(customSpy.mock.calls[0][0].config.thinkingConfig).toEqual({ thinkingBudget: 256 });
+      expect(customSpy.mock.calls[1][0].config.thinkingConfig).toEqual({ thinkingBudget: 4096 });
+
+      // 3. Level mode (explicit profile setting or Gemini 3 model) maps to thinkingLevel
+      const geminiLevelClient = new LLMClient({
+        name: 'gemini_level',
+        type: 'gemini',
+        api_key_env: 'GEMINI_API_KEY',
+        default_model: 'gemini-3-flash-preview',
+        cheap_model: 'gemini-3-flash-preview',
+        reasoning_model: 'gemini-3-pro-preview',
+        supports_reasoning_effort: true,
+        supports_logprobs: false,
+        gemini_thinking_mode: 'level',
+        input_cost_per_million: 0.10,
+        output_cost_per_million: 0.40,
+        reasoning_cost_per_million: 0.40,
+      });
+      const levelSpy = vi.fn().mockResolvedValue({
+        text: 'ok',
+        usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 2 },
+      });
+      (geminiLevelClient as any).geminiClient = { models: { generateContent: levelSpy } };
+
+      await geminiLevelClient.complete('l0', { reasoning_effort: 'none' });
+      await geminiLevelClient.complete('l1', { reasoning_effort: 'low' });
+      await geminiLevelClient.complete('l2', { reasoning_effort: 'medium' });
+      await geminiLevelClient.complete('l3', { reasoning_effort: 'high' });
+
+      expect(levelSpy.mock.calls[0][0].config.thinkingConfig).toEqual({ thinkingLevel: 'MINIMAL' });
+      expect(levelSpy.mock.calls[1][0].config.thinkingConfig).toEqual({ thinkingLevel: 'LOW' });
+      expect(levelSpy.mock.calls[2][0].config.thinkingConfig).toEqual({ thinkingLevel: 'MEDIUM' });
+      expect(levelSpy.mock.calls[3][0].config.thinkingConfig).toEqual({ thinkingLevel: 'HIGH' });
+
+      // 4. Unsupported reasoning_effort profile omits thinkingConfig
+      const unsupportedGemini = new LLMClient({
+        name: 'gemini_no_reasoning',
+        type: 'gemini',
+        api_key_env: 'GEMINI_API_KEY',
+        default_model: 'gemini-2.0-flash',
+        cheap_model: 'gemini-2.0-flash',
+        reasoning_model: 'gemini-2.0-flash',
+        supports_reasoning_effort: false,
+        supports_logprobs: false,
+        input_cost_per_million: 0.10,
+        output_cost_per_million: 0.40,
+        reasoning_cost_per_million: 0.40,
+      });
+      const noEffortSpy = vi.fn().mockResolvedValue({
+        text: 'ok',
+        usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 2 },
+      });
+      (unsupportedGemini as any).geminiClient = { models: { generateContent: noEffortSpy } };
+
+      await unsupportedGemini.complete('q_unsupported', { reasoning_effort: 'high' });
+      expect(noEffortSpy.mock.calls[0][0].config.thinkingConfig).toBeUndefined();
+    } finally {
+      delete process.env.GEMINI_API_KEY;
+    }
+  });
 });

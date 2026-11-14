@@ -8,7 +8,7 @@
  */
 
 import { ProviderProfile } from '../config/ael_config.js';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, ThinkingConfig, ThinkingLevel } from '@google/genai';
 
 export interface LLMRequestOptions {
   model?: string;
@@ -236,16 +236,50 @@ export class LLMClient {
     };
   }
 
+  private buildGeminiThinkingConfig(
+    model: string,
+    effort: 'none' | 'low' | 'medium' | 'high'
+  ): ThinkingConfig {
+    const useLevel =
+      this.profile.gemini_thinking_mode === 'level' ||
+      (this.profile.gemini_thinking_mode === undefined && /^gemini-3/i.test(model));
+
+    if (useLevel) {
+      const levelMap: Record<'none' | 'low' | 'medium' | 'high', ThinkingLevel> = {
+        none: ThinkingLevel.MINIMAL,
+        low: ThinkingLevel.LOW,
+        medium: ThinkingLevel.MEDIUM,
+        high: ThinkingLevel.HIGH,
+      };
+      return { thinkingLevel: levelMap[effort] };
+    }
+
+    const customBudgets = this.profile.gemini_thinking_budgets;
+    const defaultBudgets: Record<'none' | 'low' | 'medium' | 'high', number> = {
+      none: /2\.5-pro/i.test(model) ? 128 : 0,
+      low: 512,
+      medium: 2048,
+      high: 8192,
+    };
+
+    const budget = customBudgets?.[effort] ?? defaultBudgets[effort];
+    return { thinkingBudget: budget };
+  }
+
   private async callGemini(
     prompt: string,
     model: string,
     options: LLMRequestOptions,
     startTime: number
   ): Promise<LLMResponse> {
-    const config: any = {};
+    const config: Record<string, any> = {};
     if (options.temperature !== undefined) config.temperature = options.temperature;
     if (options.max_tokens !== undefined) config.maxOutputTokens = options.max_tokens;
     if (options.system_instruction) config.systemInstruction = options.system_instruction;
+
+    if (this.profile.supports_reasoning_effort && options.reasoning_effort) {
+      config.thinkingConfig = this.buildGeminiThinkingConfig(model, options.reasoning_effort);
+    }
 
     const response = await this.geminiClient!.models.generateContent({
       model,
