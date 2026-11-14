@@ -112,21 +112,10 @@ export function verifyCodeAssertionExecution(
   }
 
   try {
+    // Only inject Node's assert; keep VM-native intrinsics (Array, Map, Set, Date, Object)
+    // so `new Array(...)` / `new Map()` share prototypes with literal expressions in assertions.
     const sandbox: Record<string, any> = {
       assert,
-      Math,
-      JSON,
-      Array,
-      Object,
-      Map,
-      Set,
-      String,
-      Number,
-      Boolean,
-      Date,
-      RegExp,
-      Error,
-      Promise,
     };
     const context = vm.createContext(sandbox);
     vm.runInContext(jsCode, context, { timeout: 200 });

@@ -1,7 +1,7 @@
 {
   "suite_name": "AERA/CoBa Thinking Budget Suite (HELD_OUT)",
   "split": "held_out",
-  "timestamp": "2026-11-14T11:07:33.261Z",
+  "timestamp": "2026-11-14T11:33:04.771Z",
   "execution_date": "2026-11-14",
   "run_command": "npx tsx bin/ael.ts eval --suite budget --split held_out",
   "live_api_credentials_present": false,

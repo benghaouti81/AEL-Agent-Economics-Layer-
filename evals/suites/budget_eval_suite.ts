@@ -168,7 +168,7 @@ export const DISTINCT_BUDGET_QUERIES: Record<'factual' | 'math' | 'code' | 'extr
     { id: 'm_4', category: 'math', query: 'Find the remainder when 3^100 is divided by 7.', expected_number: 4, difficulty: 'medium' },
     { id: 'm_5', category: 'math', query: 'For y\'\' - 4y\' + 13y = 0 with y(0) = 2 and y\'(0) = 4, compute y(pi/6) rounded to 2 decimal places.', expected_number: 0, tolerance: 0.02, difficulty: 'hard' },
     { id: 'm_6', category: 'math', query: 'A 2-state Markov chain has transition matrix P = [[0.7, 0.3], [0.4, 0.6]]. What is the stationary probability pi_1 of state 1 (2 decimals)?', expected_number: 0.57, tolerance: 0.01, difficulty: 'hard' },
-    { id: 'm_7', category: 'math', query: 'Compute the determinant of the 3x3 matrix [[3, 2, -1], [0, 4, 5], [-2, 1, 3]].', expected_number: 9, difficulty: 'medium' },
+    { id: 'm_7', category: 'math', query: 'Compute the determinant of the 3x3 matrix [[3, 2, -1], [0, 4, 5], [-2, 1, 3]].', expected_number: -7, difficulty: 'medium' },
     { id: 'm_8', category: 'math', query: 'A fair 6-sided die is rolled 3 times. What is the probability of getting at least two sixes? Give a decimal rounded to 4 decimal places.', expected_number: 0.0741, tolerance: 0.001, difficulty: 'hard' },
     { id: 'm_9', category: 'math', query: 'Evaluate the definite integral of x * exp(-x^2) dx from x = 0 to x = infinity.', expected_number: 0.5, tolerance: 0.001, difficulty: 'medium' },
     { id: 'm_10', category: 'math', query: 'What is the trace of the 2x2 matrix [[7, -3], [4, 5]]?', expected_number: 12, difficulty: 'medium' },
@@ -180,7 +180,7 @@ export const DISTINCT_BUDGET_QUERIES: Record<'factual' | 'math' | 'code' | 'extr
     { id: 'm_16', category: 'math', query: 'Compute the volume of a sphere of radius 3 cm rounded to 2 decimal places.', expected_number: 113.1, tolerance: 0.05, difficulty: 'simple' },
     { id: 'm_17', category: 'math', query: 'How many distinct permutations can be formed from the letters of the word MISSISSIPPI?', expected_number: 34650, difficulty: 'medium' },
     { id: 'm_18', category: 'math', query: 'What is the divergence of vector field F(x, y, z) = (3x^2, 2y, -z) at point (1, 2, 3)?', expected_number: 7, difficulty: 'hard' },
-    { id: 'm_19', category: 'math', query: 'Given the recurrence a_n = 5*a_{n-1} - 6*a_{n-2} with a_0 = 1 and a_1 = 4, compute a_4.', expected_number: 52, difficulty: 'hard' },
+    { id: 'm_19', category: 'math', query: 'Given the recurrence a_n = 5*a_{n-1} - 6*a_{n-2} with a_0 = 1 and a_1 = 4, compute a_4.', expected_number: 146, difficulty: 'hard' },
     { id: 'm_20', category: 'math', query: 'Find the minimum value of f(x, y) = (x - 3)^2 + (y + 2)^2 + 11.', expected_number: 11, difficulty: 'hard' },
     { id: 'm_21', category: 'math', query: 'Evaluate the line integral of conservative field F(x, y) = (2xy, x^2) from (0,0) to (2,4) (potential phi = x^2 y).', expected_number: 16, difficulty: 'hard' },
     { id: 'm_22', category: 'math', query: 'If X ~ Poisson(lambda = 4), compute P(X = 2) = (4^2 * e^-4) / 2! rounded to 4 decimal places.', expected_number: 0.1465, tolerance: 0.001, difficulty: 'medium' },
@@ -272,7 +272,7 @@ export const DISTINCT_BUDGET_QUERIES: Record<'factual' | 'math' | 'code' | 'extr
       id: 'c_10', category: 'code', difficulty: 'hard',
       query: 'Write a TypeScript function `deepClone<T>(val: T, seen = new WeakMap()): T` supporting primitives, plain objects, arrays, Dates, and cyclic references.',
       function_name: 'deepClone',
-      assertion_script: 'const obj: any={a:1, b:[2,3]}; obj.self=obj; const cloned=deepClone(obj); assert.notStrictEqual(cloned, obj); assert.strictEqual(cloned.self, cloned); assert.deepStrictEqual(cloned.b, [2,3]);',
+      assertion_script: 'const obj={a:1, b:[2,3]}; obj.self=obj; const cloned=deepClone(obj); assert.notStrictEqual(cloned, obj); assert.strictEqual(cloned.self, cloned); assert.deepStrictEqual(cloned.b, [2,3]);',
     },
     {
       id: 'c_11', category: 'code', difficulty: 'medium',
@@ -284,7 +284,7 @@ export const DISTINCT_BUDGET_QUERIES: Record<'factual' | 'math' | 'code' | 'extr
       id: 'c_12', category: 'code', difficulty: 'medium',
       query: 'Write a TypeScript function `createEmitter()` returning `{ on(ev: string, fn: Function): void; off(ev: string, fn: Function): void; emit(ev: string, ...args: any[]): void }`.',
       function_name: 'createEmitter',
-      assertion_script: 'const e=createEmitter(); let n=0; const fn=(x:number)=>{n+=x}; e.on("inc", fn); e.emit("inc", 3); e.off("inc", fn); e.emit("inc", 5); assert.strictEqual(n, 3);',
+      assertion_script: 'const e=createEmitter(); let n=0; const fn=(x)=>{n+=x}; e.on("inc", fn); e.emit("inc", 3); e.off("inc", fn); e.emit("inc", 5); assert.strictEqual(n, 3);',
     },
     {
       id: 'c_13', category: 'code', difficulty: 'hard',
@@ -326,7 +326,7 @@ export const DISTINCT_BUDGET_QUERIES: Record<'factual' | 'math' | 'code' | 'extr
       id: 'c_19', category: 'code', difficulty: 'hard',
       query: 'Write a TypeScript function `memoize<A extends any[], R>(fn: (...args: A) => R): (...args: A) => R` caching results by JSON.stringify(args).',
       function_name: 'memoize',
-      assertion_script: 'let calls=0; const f=memoize((a:number,b:number)=>{calls++; return a+b;}); assert.strictEqual(f(1,2), 3); assert.strictEqual(f(1,2), 3); assert.strictEqual(calls, 1); assert.strictEqual(f(2,3), 5); assert.strictEqual(calls, 2);',
+      assertion_script: 'let calls=0; const f=memoize((a,b)=>{calls++; return a+b;}); assert.strictEqual(f(1,2), 3); assert.strictEqual(f(1,2), 3); assert.strictEqual(calls, 1); assert.strictEqual(f(2,3), 5); assert.strictEqual(calls, 2);',
     },
     {
       id: 'c_20', category: 'code', difficulty: 'medium',
@@ -380,7 +380,7 @@ export const DISTINCT_BUDGET_QUERIES: Record<'factual' | 'math' | 'code' | 'extr
       id: 'c_28', category: 'code', difficulty: 'simple',
       query: 'Write a TypeScript function `pipe<T>(...fns: Array<(x: T) => T>): (x: T) => T` composing functions left-to-right.',
       function_name: 'pipe',
-      assertion_script: 'const f=pipe((x:number)=>x+1, (x:number)=>x*3); assert.strictEqual(f(2), 9);',
+      assertion_script: 'const f=pipe((x)=>x+1, (x)=>x*3); assert.strictEqual(f(2), 9);',
     },
     {
       id: 'c_29', category: 'code', difficulty: 'hard',
