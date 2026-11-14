@@ -103,19 +103,19 @@ async function main() {
   // STEP 4: Thinking Budget Engine (AERA Cheap-First Routing)
   console.log('\n[Step 4] Agent sends queries through Thinking Budget Engine:');
   
-  // 4a. Simple factual query (Cheap-First probe succeeds, high savings)
+  // 4a. Simple factual query (Cheap-First probe succeeds, actual consumption logged)
   const qSimple = 'What is the capital of France?';
   const resSimple = await budgetEngine.routeAndExecute(qSimple, { workflow_id: 'agent_alpha', task_category: 'factual' });
   console.log(`Query: "${qSimple}"`);
   console.log(`  Effort: ${resSimple.final_effort}, Escalated: ${resSimple.escalated}, Confidence: ${resSimple.confidence_signal}`);
-  console.log(`  Tokens: ${resSimple.total_tokens} (vs baseline ${resSimple.baseline_tokens}), Net Saved USD: $${resSimple.net_cost_saved_usd.toFixed(5)}`);
+  console.log(`  Accounting: ${resSimple.accounting_mode}, Actual Tokens: ${resSimple.total_tokens}, Actual Cost USD: $${resSimple.total_cost_usd.toFixed(5)}`);
 
   // 4b. Complex multi-step reasoning query (Escalates to verifier)
   const qComplex = 'Calculate the optimal route between 5 nodes with constraints and prove shortest path algorithm.';
   const resComplex = await budgetEngine.routeAndExecute(qComplex, { workflow_id: 'agent_alpha', task_category: 'math' });
   console.log(`\nQuery: "${qComplex}"`);
   console.log(`  Effort: ${resComplex.final_effort}, Escalated: ${resComplex.escalated}, Confidence: ${resComplex.confidence_signal}`);
-  console.log(`  Tokens: ${resComplex.total_tokens} (vs baseline ${resComplex.baseline_tokens}), Net Saved USD: $${resComplex.net_cost_saved_usd.toFixed(5)}`);
+  console.log(`  Accounting: ${resComplex.accounting_mode}, Actual Tokens: ${resComplex.total_tokens}, Actual Cost USD: $${resComplex.total_cost_usd.toFixed(5)}`);
 
   // STEP 5: Final Economic Report
   console.log('\n[Step 5] Final ROI & Economic Savings Summary:');

@@ -79,7 +79,6 @@ describe('BudgetEngine Scaling Regimes & Escalation', () => {
     const res = await engine.routeAndExecute('What is the capital of Japan?', {
       policy: DEFAULT_PRESETS.balanced,
       task_category: 'factual',
-      measure_baseline: false,
     });
 
     expect(res.escalated).toBe(false);

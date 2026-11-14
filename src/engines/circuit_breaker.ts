@@ -49,24 +49,33 @@ export class CircuitBreakerController {
       return { tripped: false };
     }
 
-    const netSavings = recent.reduce((sum, r) => sum + r.net_cost_saved_usd, 0);
-    const netTokensSaved = recent.reduce((sum, r) => sum + r.net_tokens_saved, 0);
+    // Savings-based tripping applies only to records that carry a comparative baseline;
+    // live actual_only requests (baseline=0, net_saved=0) are governed by errorRate.
+    const comparative = recent.filter(
+      r => r.baseline_tokens > 0 || r.baseline_cost_usd > 0 || r.net_tokens_saved !== 0 || r.net_cost_saved_usd !== 0
+    );
+
+    if (comparative.length >= 5) {
+      const netSavings = comparative.reduce((sum, r) => sum + r.net_cost_saved_usd, 0);
+      const netTokensSaved = comparative.reduce((sum, r) => sum + r.net_tokens_saved, 0);
+
+      if (netSavings <= this.config.min_net_savings_usd) {
+        const reason = `Negative net savings detected over rolling window of ${comparative.length} requests: $${netSavings.toFixed(5)} <= $${this.config.min_net_savings_usd}`;
+        this.trippedWorkflows.set(workflow_id, { tripped: true, reason, timestamp: Date.now() });
+        console.warn(`[AEL Circuit Breaker] TRIPPED for workflow '${workflow_id}': ${reason}`);
+        return { tripped: true, reason };
+      }
+
+      if (netTokensSaved < 0) {
+        const reason = `Negative net token savings detected over rolling window of ${comparative.length} requests: ${netTokensSaved} tokens`;
+        this.trippedWorkflows.set(workflow_id, { tripped: true, reason, timestamp: Date.now() });
+        console.warn(`[AEL Circuit Breaker] TRIPPED for workflow '${workflow_id}': ${reason}`);
+        return { tripped: true, reason };
+      }
+    }
+
     const failureCount = recent.filter(r => !r.completed_successfully).length;
     const errorRate = failureCount / recent.length;
-
-    if (netSavings <= this.config.min_net_savings_usd) {
-      const reason = `Negative net savings detected over rolling window of ${recent.length} requests: $${netSavings.toFixed(5)} <= $${this.config.min_net_savings_usd}`;
-      this.trippedWorkflows.set(workflow_id, { tripped: true, reason, timestamp: Date.now() });
-      console.warn(`[AEL Circuit Breaker] TRIPPED for workflow '${workflow_id}': ${reason}`);
-      return { tripped: true, reason };
-    }
-
-    if (netTokensSaved < 0) {
-      const reason = `Negative net token savings detected over rolling window of ${recent.length} requests: ${netTokensSaved} tokens`;
-      this.trippedWorkflows.set(workflow_id, { tripped: true, reason, timestamp: Date.now() });
-      console.warn(`[AEL Circuit Breaker] TRIPPED for workflow '${workflow_id}': ${reason}`);
-      return { tripped: true, reason };
-    }
 
     if (errorRate > this.config.max_error_rate) {
       const reason = `Excessive error rate over rolling window: ${(errorRate * 100).toFixed(1)}% > ${(this.config.max_error_rate * 100).toFixed(1)}%`;

@@ -14,6 +14,7 @@ import { ConfidenceLevel, ScalingRegime } from '../models/contracts.js';
 
 export interface BudgetRoutingResult {
   text: string;
+  accounting_mode: 'actual_only' | 'comparative_benchmark';
   regime: ScalingRegime;
   final_effort: 'none' | 'low' | 'medium' | 'high';
   escalated: boolean;
@@ -28,12 +29,7 @@ export interface BudgetRoutingResult {
   net_cost_saved_usd: number;
   baseline_tokens: number;
   baseline_cost_usd: number;
-  baseline_source: 'measured_reference' | 'assumed_baseline';
-  assumed_baseline?: {
-    total_tokens: number;
-    cost_usd: number;
-    basis: string;
-  };
+  baseline_source: 'none_actual_only' | 'comparative_benchmark';
   latency_ms: number;
   ael_overhead_ms: number;
   circuit_breaker_tripped: boolean;
@@ -57,8 +53,6 @@ export class BudgetEngine {
       policy?: PresetPolicy;
       pass_through?: boolean;
       reference_baseline?: { total_tokens: number; cost_usd: number };
-      assumed_baseline?: { total_tokens: number; cost_usd: number; basis?: string };
-      measure_baseline?: boolean;
     } = {}
   ): Promise<BudgetRoutingResult> {
     const startTime = Date.now();
@@ -67,7 +61,7 @@ export class BudgetEngine {
     const policy = options.policy || this.defaultPolicy;
     const query_hash = crypto.createHash('sha256').update(prompt).digest('hex').substring(0, 16);
 
-    // Check Circuit Breaker (using unfloored historical savings)
+    // Check Circuit Breaker (using unfloored historical comparative savings & error rate)
     const breakerStatus = this.circuitBreaker.isTripped(workflow_id);
     const passThrough = options.pass_through || breakerStatus.tripped;
 
@@ -84,37 +78,18 @@ export class BudgetEngine {
       );
     }
 
-    // Obtain baseline either from pre-measured reference, live reference call, or explicit assumed_baseline
-    let baselineTotalTokens: number;
-    let baselineCostUsd: number;
-    let baselineSource: 'measured_reference' | 'assumed_baseline';
-    let assumedBaselineDetail: { total_tokens: number; cost_usd: number; basis: string } | undefined;
-
-    if (options.reference_baseline) {
-      baselineTotalTokens = options.reference_baseline.total_tokens;
-      baselineCostUsd = options.reference_baseline.cost_usd;
-      baselineSource = 'measured_reference';
-    } else if (options.assumed_baseline) {
-      baselineTotalTokens = options.assumed_baseline.total_tokens;
-      baselineCostUsd = options.assumed_baseline.cost_usd;
-      baselineSource = 'assumed_baseline';
-      assumedBaselineDetail = {
-        total_tokens: baselineTotalTokens,
-        cost_usd: baselineCostUsd,
-        basis: options.assumed_baseline.basis || 'caller_supplied_assumed_baseline',
-      };
-    } else if (options.measure_baseline !== false) {
-      // Measure reference consumption directly by running the same task at fixed high reasoning effort
-      const refRes = await this.llm.complete(prompt, { reasoning_effort: 'high' });
-      baselineTotalTokens = refRes.total_tokens;
-      baselineCostUsd = refRes.cost_usd;
-      baselineSource = 'measured_reference';
-    } else {
-      // Defer to executed probe / actual consumption as an explicitly labeled assumed_baseline (zero fabricated constants)
-      baselineTotalTokens = 0;
-      baselineCostUsd = 0;
-      baselineSource = 'assumed_baseline';
-    }
+    // Live per-request accounting reports ACTUAL consumption only (never counterfactual savings).
+    // Comparative savings are computed ONLY when a comparative benchmark supplies reference_baseline
+    // measured on identical samples.
+    const hasComparativeBaseline = options.reference_baseline !== undefined;
+    const accountingMode: 'actual_only' | 'comparative_benchmark' = hasComparativeBaseline
+      ? 'comparative_benchmark'
+      : 'actual_only';
+    const baselineSource: 'none_actual_only' | 'comparative_benchmark' = hasComparativeBaseline
+      ? 'comparative_benchmark'
+      : 'none_actual_only';
+    const baselineTotalTokens = hasComparativeBaseline ? options.reference_baseline!.total_tokens : 0;
+    const baselineCostUsd = hasComparativeBaseline ? options.reference_baseline!.cost_usd : 0;
 
     let aelInternalTokens = 0;
     let aelInternalCost = 0;
@@ -218,21 +193,10 @@ export class BudgetEngine {
     const actualTotalTokens = upstreamTokens + aelInternalTokens;
     const actualTotalCost = upstreamCost + aelInternalCost;
 
-    // Finalize explicitly labeled assumed_baseline when measure_baseline=false and no baseline supplied
-    if (baselineSource === 'assumed_baseline' && !assumedBaselineDetail) {
-      baselineTotalTokens = probeResponse.total_tokens;
-      baselineCostUsd = probeResponse.cost_usd;
-      assumedBaselineDetail = {
-        total_tokens: baselineTotalTokens,
-        cost_usd: baselineCostUsd,
-        basis: 'initial_probe_unescalated_reference',
-      };
-    }
-
-    // NET SAVINGS ACCOUNTING (UNFLOORED so losses are visible and consumed by CircuitBreaker):
-    // Net Savings = Baseline - (Upstream + AEL Internal)
-    const netTokensSaved = baselineTotalTokens - actualTotalTokens;
-    const netCostSavedUsd = Number((baselineCostUsd - actualTotalCost).toFixed(6));
+    // Comparative net savings are computed ONLY in comparative_benchmark mode (never counterfactual per-request).
+    // In actual_only live mode, baseline and savings are zero and actual consumption is logged.
+    const netTokensSaved = hasComparativeBaseline ? baselineTotalTokens - actualTotalTokens : 0;
+    const netCostSavedUsd = hasComparativeBaseline ? Number((baselineCostUsd - actualTotalCost).toFixed(6)) : 0;
 
     // Write to SQLite Decision Log
     this.logStore.insertDecision({
@@ -273,6 +237,7 @@ export class BudgetEngine {
 
     return {
       text: finalResponse.text,
+      accounting_mode: accountingMode,
       regime: policy.regime,
       final_effort: finalEffort,
       escalated: shouldEscalate,
@@ -288,7 +253,6 @@ export class BudgetEngine {
       baseline_tokens: baselineTotalTokens,
       baseline_cost_usd: baselineCostUsd,
       baseline_source: baselineSource,
-      ...(assumedBaselineDetail ? { assumed_baseline: assumedBaselineDetail } : {}),
       latency_ms: totalLatency,
       ael_overhead_ms: finalAelOverheadMs,
       circuit_breaker_tripped: breakerStatus.tripped,
@@ -330,13 +294,14 @@ export class BudgetEngine {
     circuitBreakerTripped: boolean,
     referenceBaseline?: { total_tokens: number; cost_usd: number }
   ): Promise<BudgetRoutingResult> {
-    // Pass-through: uses baseline high effort directly; reference baseline equals the execution itself if none supplied
+    // Pass-through: uses baseline high effort directly; live requests report actual consumption only
     const response = await this.llm.complete(prompt, { reasoning_effort: 'high' });
     const latency_ms = Date.now() - startTime;
-    const baselineTotalTokens = referenceBaseline ? referenceBaseline.total_tokens : response.total_tokens;
-    const baselineCostUsd = referenceBaseline ? referenceBaseline.cost_usd : response.cost_usd;
-    const netTokensSaved = baselineTotalTokens - response.total_tokens;
-    const netCostSavedUsd = Number((baselineCostUsd - response.cost_usd).toFixed(6));
+    const hasRef = referenceBaseline !== undefined;
+    const baselineTotalTokens = hasRef ? referenceBaseline!.total_tokens : 0;
+    const baselineCostUsd = hasRef ? referenceBaseline!.cost_usd : 0;
+    const netTokensSaved = hasRef ? baselineTotalTokens - response.total_tokens : 0;
+    const netCostSavedUsd = hasRef ? Number((baselineCostUsd - response.cost_usd).toFixed(6)) : 0;
 
     this.logStore.insertDecision({
       id: crypto.randomUUID(),
@@ -376,6 +341,7 @@ export class BudgetEngine {
 
     return {
       text: response.text,
+      accounting_mode: hasRef ? 'comparative_benchmark' : 'actual_only',
       regime: 'single',
       final_effort: 'high',
       escalated: false,
@@ -390,7 +356,7 @@ export class BudgetEngine {
       net_cost_saved_usd: netCostSavedUsd,
       baseline_tokens: baselineTotalTokens,
       baseline_cost_usd: baselineCostUsd,
-      baseline_source: 'measured_reference',
+      baseline_source: hasRef ? 'comparative_benchmark' : 'none_actual_only',
       latency_ms,
       ael_overhead_ms: 1,
       circuit_breaker_tripped: circuitBreakerTripped,

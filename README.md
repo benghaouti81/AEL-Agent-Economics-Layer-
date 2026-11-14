@@ -47,7 +47,8 @@ Both engines write to a unified, file-backed **SQLite Decision Log (`better-sqli
 | **Average Reflection Retries** | $\le 1.5$ retries | **0 retries** *(0/10 selection cases; source: `2026-11-13_tool_selection.json`)* | **NOT VALIDATED** *(Smoke threshold met)* |
 | **Dry-Run Mode Enforcement** | Mutating tools blocked from execution | **100.0% enforced** *(1/1 mutating tool `fin_transfer_funds` blocked as `schema_only`; source: `2026-11-13_tool_selection.json`)* | **NOT VALIDATED** *(Smoke threshold met)* |
 
-### 2. Thinking Budget Engine (AERA / CoBa on 200 Held-Out Queries — Offline Smoke Run)
+### 2. Thinking Budget Engine (Separate Comparative Benchmark on 200 Held-Out Queries — Offline Smoke Run)
+- **Benchmark Type**: `comparative_benchmark_identical_samples` (AEL BudgetEngine vs. fixed `high`-effort baseline executed side-by-side on identical samples; savings claims come exclusively from this comparative benchmark, never from live per-request counterfactuals).
 - **Source**: `evals/results/2026-11-14_budget_held_out.json`
 - **Run Command**: `npx tsx bin/ael.ts eval --suite budget --split held_out` *(with `AEL_ALLOW_MOCK=1`)*
 - **Execution Date**: 2026-11-14
@@ -120,7 +121,11 @@ AEL classifies decision evidence into six distinct, non-equivalent signals:
 > **Methodological Note on Consensus**: Self-consistency across $k$ samples is recorded strictly as an empirical stopping heuristic, **NOT** mathematical proof of correctness.
 
 ### 3. Negative-Savings Circuit Breaker
-Per workflow, AEL maintains a rolling window of 20 requests. If rolling net savings fall $\le \$0.00$ or error rate exceeds threshold, AEL automatically trips that workflow to pass-through mode, logs a warning, and surfaces it on the dashboard and CLI.
+Per workflow, AEL maintains a rolling window of 20 requests. If rolling net savings (on comparative runs) fall $\le \$0.00$ or error rate exceeds threshold, AEL automatically trips that workflow to pass-through mode, logs a warning, and surfaces it on the dashboard and CLI.
+
+### 4. Actual-Only Live Accounting vs. Comparative Benchmark Claims
+- **Live Per-Request Accounting (`actual_only`)**: Live proxy endpoints (`POST /v1/chat/completions`, `POST /v1/messages`) and `BudgetEngine.routeAndExecute()` (without a comparative benchmark baseline) report **actual consumption only** (`actual_tokens`, `upstream_tokens`, `ael_internal_tokens`, `actual_cost_usd`, `ael_overhead_ms`). AEL never executes hidden counterfactual calls or claims per-request savings on live traffic.
+- **Comparative Benchmark Savings (`comparative_benchmark_identical_samples`)**: All token and USD savings claims come exclusively from the separate comparative benchmark (`eval --suite budget`), which evaluates fixed `high`-effort baseline and AEL side-by-side on identical samples.
 
 ---
 

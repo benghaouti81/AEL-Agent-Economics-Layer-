@@ -65,6 +65,8 @@ export interface CategoryMetric {
 
 export interface BudgetEvalResult {
   suite_name: string;
+  benchmark_type: 'comparative_benchmark_identical_samples';
+  benchmark_methodology: string;
   split: 'held_out' | 'tuning';
   timestamp: string;
   execution_date: string;
@@ -1025,7 +1027,10 @@ export async function runBudgetEvalSuite(
   const dateStr = now.toISOString().split('T')[0];
 
   const result: BudgetEvalResult = {
-    suite_name: `AERA/CoBa Thinking Budget Suite (${split.toUpperCase()})`,
+    suite_name: `AERA/CoBa Thinking Budget Comparative Benchmark (${split.toUpperCase()})`,
+    benchmark_type: 'comparative_benchmark_identical_samples',
+    benchmark_methodology:
+      'Separate comparative benchmark running fixed high-effort baseline vs AEL BudgetEngine on identical samples; live per-request proxy accounting reports actual consumption only.',
     split,
     timestamp: now.toISOString(),
     execution_date: dateStr,

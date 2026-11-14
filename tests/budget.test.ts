@@ -45,13 +45,37 @@ describe('Budget Engine & Circuit Breaker', () => {
     else process.env.AEL_ALLOW_MOCK = originalAllowMock;
   });
 
-  it('allocates cheap compute for simple queries and reports net savings', async () => {
+  it('allocates cheap compute for simple queries and reports actual-only consumption without counterfactual savings (P0-15)', async () => {
+    let callCount = 0;
+    const origComplete = llm.complete.bind(llm);
+    llm.complete = async (prompt, options) => {
+      callCount++;
+      return origComplete(prompt, options);
+    };
+
     const res = await engine.routeAndExecute('What is 2 + 2?', { task_category: 'factual' });
+    expect(callCount).toBe(1); // Must NOT run a hidden counterfactual baseline call on live requests
     expect(res.final_effort).toBe('low');
     expect(res.escalated).toBe(false);
-    expect(res.total_tokens).toBeLessThan(res.baseline_tokens);
-    expect(res.net_cost_saved_usd).toBeGreaterThan(0);
+    expect(res.accounting_mode).toBe('actual_only');
+    expect(res.baseline_source).toBe('none_actual_only');
+    expect(res.baseline_tokens).toBe(0);
+    expect(res.baseline_cost_usd).toBe(0);
+    expect(res.net_tokens_saved).toBe(0);
+    expect(res.net_cost_saved_usd).toBe(0);
+    expect(res.total_tokens).toBeGreaterThan(0);
+    expect(res.total_cost_usd).toBeGreaterThan(0);
     expect(res.ael_overhead_ms).toBeGreaterThanOrEqual(0);
+  });
+
+  it('does not falsely trip negative-savings breaker on live actual-only requests', async () => {
+    const wf = 'live_actual_only_wf';
+    for (let i = 0; i < 6; i++) {
+      const r = await engine.routeAndExecute(`What is 2 + ${i}?`, { workflow_id: wf, task_category: 'factual' });
+      expect(r.accounting_mode).toBe('actual_only');
+      expect(r.pass_through).toBe(false);
+    }
+    expect(circuitBreaker.isTripped(wf).tripped).toBe(false);
   });
 
   it('emits unavailable instead of consensus when single-regime probe has no logprob_confidence', async () => {
@@ -88,23 +112,18 @@ describe('Budget Engine & Circuit Breaker', () => {
     expect(breakerCheck.reason).toContain('Negative net savings');
   });
 
-  it('removes hardcoded 800/120 constants, exposes unfloored negative net_tokens_saved, and trips breaker on token losses (P0-10)', async () => {
-    // 1. Measured reference baseline reflects actual LLM baseline call
-    const measured = await engine.routeAndExecute('What is 2 + 2?', { task_category: 'factual' });
-    expect(measured.baseline_source).toBe('measured_reference');
-    expect(measured.assumed_baseline).toBeUndefined();
-
-    // 2. When measure_baseline is false, emits explicitly labeled assumed_baseline
-    const assumed = await engine.routeAndExecute('Calculate matrix eigenvalues for differential optimization', {
-      task_category: 'math',
-      measure_baseline: false,
+  it('computes unfloored savings only in comparative benchmark mode and trips breaker on token losses (P0-10 + P0-15)', async () => {
+    // 1. Comparative benchmark: baseline measured separately on identical sample
+    const baseline = await llm.complete('What is 2 + 2?', { reasoning_effort: 'high' });
+    const comparative = await engine.routeAndExecute('What is 2 + 2?', {
+      task_category: 'factual',
+      reference_baseline: { total_tokens: baseline.total_tokens, cost_usd: baseline.cost_usd },
     });
-    expect(assumed.baseline_source).toBe('assumed_baseline');
-    expect(assumed.assumed_baseline).toBeDefined();
-    // Escalation costs more tokens than unescalated probe -> negative net_tokens_saved must be visible (not floored to 0)
-    expect(assumed.net_tokens_saved).toBeLessThan(0);
+    expect(comparative.accounting_mode).toBe('comparative_benchmark');
+    expect(comparative.baseline_source).toBe('comparative_benchmark');
+    expect(comparative.net_tokens_saved).toBeGreaterThan(0);
 
-    // 3. Passing small reference_baseline exposes unfloored negative net_tokens_saved in result & DecisionLogStore, tripping circuit breaker
+    // 2. Passing small reference_baseline exposes unfloored negative net_tokens_saved in result & DecisionLogStore, tripping circuit breaker
     const wf = 'unfloored_token_loss_wf';
     for (let i = 0; i < 5; i++) {
       const r = await engine.routeAndExecute(`Solve differential equation #${i}`, {
@@ -112,6 +131,7 @@ describe('Budget Engine & Circuit Breaker', () => {
         task_category: 'math',
         reference_baseline: { total_tokens: 50, cost_usd: 1.0 },
       });
+      expect(r.accounting_mode).toBe('comparative_benchmark');
       expect(r.net_tokens_saved).toBeLessThan(0);
     }
 

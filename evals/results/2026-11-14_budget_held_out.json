@@ -1,7 +1,9 @@
 {
-  "suite_name": "AERA/CoBa Thinking Budget Suite (HELD_OUT)",
+  "suite_name": "AERA/CoBa Thinking Budget Comparative Benchmark (HELD_OUT)",
+  "benchmark_type": "comparative_benchmark_identical_samples",
+  "benchmark_methodology": "Separate comparative benchmark running fixed high-effort baseline vs AEL BudgetEngine on identical samples; live per-request proxy accounting reports actual consumption only.",
   "split": "held_out",
-  "timestamp": "2026-11-14T11:33:04.771Z",
+  "timestamp": "2026-11-14T11:38:18.350Z",
   "execution_date": "2026-11-14",
   "run_command": "npx tsx bin/ael.ts eval --suite budget --split held_out",
   "live_api_credentials_present": false,

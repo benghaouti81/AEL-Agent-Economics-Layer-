@@ -88,7 +88,6 @@ async function startServer() {
         task_category,
         policy: activePreset,
         pass_through: config.pass_through,
-        measure_baseline: false,
       });
 
       res.json({
@@ -110,19 +109,18 @@ async function startServer() {
           prompt_tokens: Math.ceil(lastUserMsg.length / 4),
           completion_tokens: Math.ceil(result.text.length / 4),
           total_tokens: result.total_tokens,
-          reasoning_tokens: result.total_tokens - (Math.ceil(lastUserMsg.length / 4) + Math.ceil(result.text.length / 4)),
+          reasoning_tokens: Math.max(0, result.total_tokens - (Math.ceil(lastUserMsg.length / 4) + Math.ceil(result.text.length / 4))),
         },
         ael_economics: {
+          accounting_mode: result.accounting_mode,
           regime: result.regime,
           effort: result.final_effort,
           confidence_signal: result.confidence_signal,
-          baseline_tokens: result.baseline_tokens,
-          baseline_source: result.baseline_source,
-          ...(result.assumed_baseline ? { assumed_baseline: result.assumed_baseline } : {}),
-          net_tokens_saved: result.net_tokens_saved,
-          baseline_cost_usd: result.baseline_cost_usd,
+          actual_tokens: result.total_tokens,
+          upstream_tokens: result.upstream_tokens,
+          ael_internal_tokens: result.ael_internal_tokens,
           actual_cost_usd: result.total_cost_usd,
-          net_cost_saved_usd: result.net_cost_saved_usd,
+          ael_overhead_ms: result.ael_overhead_ms,
           circuit_breaker_tripped: result.circuit_breaker_tripped,
         },
       });
@@ -141,7 +139,6 @@ async function startServer() {
         workflow_id,
         policy: activePreset,
         pass_through: config.pass_through,
-        measure_baseline: false,
       });
 
       res.json({
@@ -155,11 +152,16 @@ async function startServer() {
           output_tokens: Math.ceil(result.text.length / 4),
         },
         ael_economics: {
+          accounting_mode: result.accounting_mode,
+          regime: result.regime,
+          effort: result.final_effort,
           confidence_signal: result.confidence_signal,
-          baseline_source: result.baseline_source,
-          ...(result.assumed_baseline ? { assumed_baseline: result.assumed_baseline } : {}),
-          net_tokens_saved: result.net_tokens_saved,
-          net_cost_saved_usd: result.net_cost_saved_usd,
+          actual_tokens: result.total_tokens,
+          upstream_tokens: result.upstream_tokens,
+          ael_internal_tokens: result.ael_internal_tokens,
+          actual_cost_usd: result.total_cost_usd,
+          ael_overhead_ms: result.ael_overhead_ms,
+          circuit_breaker_tripped: result.circuit_breaker_tripped,
         },
       });
     } catch (err: any) {
