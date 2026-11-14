@@ -109,6 +109,25 @@ dashboard feature.
   work → verify → push back, tested against at least one constrained
   environment. "Self-hosted" means the round-trip works, not just the install.
 
+P0-8 budget.ts: when no logprob_confidence is available the code emits
+confidenceSignal 'consensus' with no consensus process. Replace with
+'unavailable', update asserting tests, and document each confidence_signal's
+exact meaning in README.
+P0-9 evals/suites/budget_eval_suite.ts: correctness counts any non-empty
+response (res.text.trim().length > 0) and baseline accuracy is hardcoded
+(96%). Implement real per-category verification (math: numeric match; code:
+assertion/execution; extraction: JSON field match; reasoning: judge verdict),
+remove the hardcoded baseline accuracy, and report accuracy with
+numerator/denominator and per-category breakdown.
+P0-10 budget.ts: remove the 800/120 baseline constants — measure the
+reference consumption by running the same task with minimal reasoning, or
+emit it as an explicitly labeled 'assumed_baseline' field; remove
+Math.max(0, ...) flooring on netTokensSaved so losses are visible; circuit
+breaker must consume unfloored values.
+P0-11 tool_dc.ts: cache hits on mutating/side-effect tools must not bypass
+dry-run/safety checks — add a dedicated test proving the cache-hit path
+still enforces side-effect policy.
+
 ## 7. COMMUNICATION CONTRACT
 Every reply ends with one of: (a) commit SHAs + push output + Actions run
 URL, (b) "NOT DONE: <reason>" + raw error, or (c) a specific question if
