@@ -228,7 +228,7 @@ export class ToolDCEngine {
         baseline_tokens: baselineTokens,
         upstream_tokens: 0,
         ael_internal_tokens: ael_overhead_tokens,
-        net_tokens_saved: Math.max(0, baselineTokens - ael_overhead_tokens),
+        net_tokens_saved: baselineTokens - ael_overhead_tokens,
         baseline_cost_usd: baselineCostUsd,
         upstream_cost_usd: 0,
         ael_internal_cost_usd: ael_overhead_cost,
@@ -266,7 +266,7 @@ export class ToolDCEngine {
     const totalLatency = Date.now() - startTime;
 
     // Baseline already measured from registry schemas & active provider pricing
-    const netTokensSaved = Math.max(0, baselineTokens - ael_overhead_tokens);
+    const netTokensSaved = baselineTokens - ael_overhead_tokens;
     const netCostSaved = Number((baselineCostUsd - ael_overhead_cost).toFixed(6));
 
     this.logDecision({

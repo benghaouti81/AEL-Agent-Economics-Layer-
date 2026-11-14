@@ -218,8 +218,8 @@ export class DecisionLogStore {
     const totalBaseCost = aggRow.total_baseline_cost_usd || 0.0001;
     const successfulTasks = aggRow.successful_tasks || 1;
 
-    const percent_tokens_saved = Math.max(0, (aggRow.total_net_tokens_saved / totalBaseTokens) * 100);
-    const percent_cost_saved = Math.max(0, (aggRow.total_net_cost_saved_usd / totalBaseCost) * 100);
+    const percent_tokens_saved = (aggRow.total_net_tokens_saved / totalBaseTokens) * 100;
+    const percent_cost_saved = (aggRow.total_net_cost_saved_usd / totalBaseCost) * 100;
 
     const tool_selection_accuracy = total > 0 ? (aggRow.accurate_selections / total) : 1.0;
 

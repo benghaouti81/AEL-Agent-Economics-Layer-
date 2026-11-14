@@ -23,10 +23,17 @@ export interface BudgetRoutingResult {
   total_tokens: number;
   upstream_tokens: number;
   ael_internal_tokens: number;
+  net_tokens_saved: number;
   total_cost_usd: number;
   net_cost_saved_usd: number;
   baseline_tokens: number;
   baseline_cost_usd: number;
+  baseline_source: 'measured_reference' | 'assumed_baseline';
+  assumed_baseline?: {
+    total_tokens: number;
+    cost_usd: number;
+    basis: string;
+  };
   latency_ms: number;
   ael_overhead_ms: number;
   circuit_breaker_tripped: boolean;
@@ -49,6 +56,9 @@ export class BudgetEngine {
       task_category?: string;
       policy?: PresetPolicy;
       pass_through?: boolean;
+      reference_baseline?: { total_tokens: number; cost_usd: number };
+      assumed_baseline?: { total_tokens: number; cost_usd: number; basis?: string };
+      measure_baseline?: boolean;
     } = {}
   ): Promise<BudgetRoutingResult> {
     const startTime = Date.now();
@@ -57,19 +67,53 @@ export class BudgetEngine {
     const policy = options.policy || this.defaultPolicy;
     const query_hash = crypto.createHash('sha256').update(prompt).digest('hex').substring(0, 16);
 
-    // Baseline definitions (Fixed High Effort uniformly across all queries)
-    const baselineReasoningTokens = 800;
-    const baselineInputTokens = Math.ceil(prompt.length / 4);
-    const baselineOutputTokens = 120;
-    const baselineTotalTokens = baselineInputTokens + baselineOutputTokens + baselineReasoningTokens;
-    const baselineCostUsd = this.llm.calculateCost(baselineInputTokens, baselineOutputTokens, baselineReasoningTokens);
-
-    // Check Circuit Breaker
+    // Check Circuit Breaker (using unfloored historical savings)
     const breakerStatus = this.circuitBreaker.isTripped(workflow_id);
     const passThrough = options.pass_through || breakerStatus.tripped;
 
     if (passThrough) {
-      return this.executePassThrough(prompt, workflow_id, options.session_id, query_hash, task_category, startTime, breakerStatus.tripped, baselineTotalTokens, baselineCostUsd);
+      return this.executePassThrough(
+        prompt,
+        workflow_id,
+        options.session_id,
+        query_hash,
+        task_category,
+        startTime,
+        breakerStatus.tripped,
+        options.reference_baseline
+      );
+    }
+
+    // Obtain baseline either from pre-measured reference, live reference call, or explicit assumed_baseline
+    let baselineTotalTokens: number;
+    let baselineCostUsd: number;
+    let baselineSource: 'measured_reference' | 'assumed_baseline';
+    let assumedBaselineDetail: { total_tokens: number; cost_usd: number; basis: string } | undefined;
+
+    if (options.reference_baseline) {
+      baselineTotalTokens = options.reference_baseline.total_tokens;
+      baselineCostUsd = options.reference_baseline.cost_usd;
+      baselineSource = 'measured_reference';
+    } else if (options.assumed_baseline) {
+      baselineTotalTokens = options.assumed_baseline.total_tokens;
+      baselineCostUsd = options.assumed_baseline.cost_usd;
+      baselineSource = 'assumed_baseline';
+      assumedBaselineDetail = {
+        total_tokens: baselineTotalTokens,
+        cost_usd: baselineCostUsd,
+        basis: options.assumed_baseline.basis || 'caller_supplied_assumed_baseline',
+      };
+    } else if (options.measure_baseline !== false) {
+      // Measure reference consumption directly by running the same task at fixed high reasoning effort
+      const refRes = await this.llm.complete(prompt, { reasoning_effort: 'high' });
+      baselineTotalTokens = refRes.total_tokens;
+      baselineCostUsd = refRes.cost_usd;
+      baselineSource = 'measured_reference';
+    } else {
+      // Defer to executed probe / actual consumption as an explicitly labeled assumed_baseline (zero fabricated constants)
+      baselineTotalTokens = 0;
+      baselineCostUsd = 0;
+      baselineSource = 'assumed_baseline';
     }
 
     let aelInternalTokens = 0;
@@ -174,9 +218,20 @@ export class BudgetEngine {
     const actualTotalTokens = upstreamTokens + aelInternalTokens;
     const actualTotalCost = upstreamCost + aelInternalCost;
 
-    // NET SAVINGS ACCOUNTING:
-    // Net Savings = Baseline Cost - (Upstream Cost + AEL Internal Cost)
-    const netTokensSaved = Math.max(0, baselineTotalTokens - actualTotalTokens);
+    // Finalize explicitly labeled assumed_baseline when measure_baseline=false and no baseline supplied
+    if (baselineSource === 'assumed_baseline' && !assumedBaselineDetail) {
+      baselineTotalTokens = probeResponse.total_tokens;
+      baselineCostUsd = probeResponse.cost_usd;
+      assumedBaselineDetail = {
+        total_tokens: baselineTotalTokens,
+        cost_usd: baselineCostUsd,
+        basis: 'initial_probe_unescalated_reference',
+      };
+    }
+
+    // NET SAVINGS ACCOUNTING (UNFLOORED so losses are visible and consumed by CircuitBreaker):
+    // Net Savings = Baseline - (Upstream + AEL Internal)
+    const netTokensSaved = baselineTotalTokens - actualTotalTokens;
     const netCostSavedUsd = Number((baselineCostUsd - actualTotalCost).toFixed(6));
 
     // Write to SQLite Decision Log
@@ -227,10 +282,13 @@ export class BudgetEngine {
       total_tokens: actualTotalTokens,
       upstream_tokens: upstreamTokens,
       ael_internal_tokens: aelInternalTokens,
+      net_tokens_saved: netTokensSaved,
       total_cost_usd: actualTotalCost,
       net_cost_saved_usd: netCostSavedUsd,
       baseline_tokens: baselineTotalTokens,
       baseline_cost_usd: baselineCostUsd,
+      baseline_source: baselineSource,
+      ...(assumedBaselineDetail ? { assumed_baseline: assumedBaselineDetail } : {}),
       latency_ms: totalLatency,
       ael_overhead_ms: finalAelOverheadMs,
       circuit_breaker_tripped: breakerStatus.tripped,
@@ -270,12 +328,15 @@ export class BudgetEngine {
     task_category: string,
     startTime: number,
     circuitBreakerTripped: boolean,
-    baselineTotalTokens: number,
-    baselineCostUsd: number
+    referenceBaseline?: { total_tokens: number; cost_usd: number }
   ): Promise<BudgetRoutingResult> {
-    // Pass-through: uses baseline high effort, 0 AEL savings
+    // Pass-through: uses baseline high effort directly; reference baseline equals the execution itself if none supplied
     const response = await this.llm.complete(prompt, { reasoning_effort: 'high' });
     const latency_ms = Date.now() - startTime;
+    const baselineTotalTokens = referenceBaseline ? referenceBaseline.total_tokens : response.total_tokens;
+    const baselineCostUsd = referenceBaseline ? referenceBaseline.cost_usd : response.cost_usd;
+    const netTokensSaved = baselineTotalTokens - response.total_tokens;
+    const netCostSavedUsd = Number((baselineCostUsd - response.cost_usd).toFixed(6));
 
     this.logStore.insertDecision({
       id: crypto.randomUUID(),
@@ -301,11 +362,11 @@ export class BudgetEngine {
       baseline_tokens: baselineTotalTokens,
       upstream_tokens: response.total_tokens,
       ael_internal_tokens: 0,
-      net_tokens_saved: 0,
+      net_tokens_saved: netTokensSaved,
       baseline_cost_usd: baselineCostUsd,
       upstream_cost_usd: response.cost_usd,
       ael_internal_cost_usd: 0,
-      net_cost_saved_usd: 0,
+      net_cost_saved_usd: netCostSavedUsd,
       latency_ms,
       ael_overhead_ms: 1,
       completed_successfully: true,
@@ -324,10 +385,12 @@ export class BudgetEngine {
       total_tokens: response.total_tokens,
       upstream_tokens: response.total_tokens,
       ael_internal_tokens: 0,
+      net_tokens_saved: netTokensSaved,
       total_cost_usd: response.cost_usd,
-      net_cost_saved_usd: 0,
+      net_cost_saved_usd: netCostSavedUsd,
       baseline_tokens: baselineTotalTokens,
       baseline_cost_usd: baselineCostUsd,
+      baseline_source: 'measured_reference',
       latency_ms,
       ael_overhead_ms: 1,
       circuit_breaker_tripped: circuitBreakerTripped,

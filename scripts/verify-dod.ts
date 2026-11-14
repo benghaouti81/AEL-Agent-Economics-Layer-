@@ -62,6 +62,11 @@ function checkMagicNumbers(): void {
       regex: /externally_verified/,
       fileFilter: (rel) => rel === 'src/engines/budget.ts',
     },
+    {
+      name: 'hardcoded 800/120 baseline constants in budget.ts',
+      regex: /\b(800|120)\b/,
+      fileFilter: (rel) => rel === 'src/engines/budget.ts',
+    },
   ];
 
   const files = walkTsFiles(srcDir);

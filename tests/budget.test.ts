@@ -87,4 +87,40 @@ describe('Budget Engine & Circuit Breaker', () => {
     expect(breakerCheck.tripped).toBe(true);
     expect(breakerCheck.reason).toContain('Negative net savings');
   });
+
+  it('removes hardcoded 800/120 constants, exposes unfloored negative net_tokens_saved, and trips breaker on token losses (P0-10)', async () => {
+    // 1. Measured reference baseline reflects actual LLM baseline call
+    const measured = await engine.routeAndExecute('What is 2 + 2?', { task_category: 'factual' });
+    expect(measured.baseline_source).toBe('measured_reference');
+    expect(measured.assumed_baseline).toBeUndefined();
+
+    // 2. When measure_baseline is false, emits explicitly labeled assumed_baseline
+    const assumed = await engine.routeAndExecute('Calculate matrix eigenvalues for differential optimization', {
+      task_category: 'math',
+      measure_baseline: false,
+    });
+    expect(assumed.baseline_source).toBe('assumed_baseline');
+    expect(assumed.assumed_baseline).toBeDefined();
+    // Escalation costs more tokens than unescalated probe -> negative net_tokens_saved must be visible (not floored to 0)
+    expect(assumed.net_tokens_saved).toBeLessThan(0);
+
+    // 3. Passing small reference_baseline exposes unfloored negative net_tokens_saved in result & DecisionLogStore, tripping circuit breaker
+    const wf = 'unfloored_token_loss_wf';
+    for (let i = 0; i < 5; i++) {
+      const r = await engine.routeAndExecute(`Solve differential equation #${i}`, {
+        workflow_id: wf,
+        task_category: 'math',
+        reference_baseline: { total_tokens: 50, cost_usd: 1.0 },
+      });
+      expect(r.net_tokens_saved).toBeLessThan(0);
+    }
+
+    const recent = logStore.getWorkflowDecisions(wf, 10);
+    expect(recent.length).toBe(5);
+    expect(recent.every(d => d.net_tokens_saved < 0)).toBe(true);
+
+    const breakerCheck = circuitBreaker.isTripped(wf);
+    expect(breakerCheck.tripped).toBe(true);
+    expect(breakerCheck.reason).toContain('Negative net token savings');
+  });
 });

@@ -88,6 +88,7 @@ async function startServer() {
         task_category,
         policy: activePreset,
         pass_through: config.pass_through,
+        measure_baseline: false,
       });
 
       res.json({
@@ -116,7 +117,9 @@ async function startServer() {
           effort: result.final_effort,
           confidence_signal: result.confidence_signal,
           baseline_tokens: result.baseline_tokens,
-          net_tokens_saved: Math.max(0, result.baseline_tokens - result.total_tokens),
+          baseline_source: result.baseline_source,
+          ...(result.assumed_baseline ? { assumed_baseline: result.assumed_baseline } : {}),
+          net_tokens_saved: result.net_tokens_saved,
           baseline_cost_usd: result.baseline_cost_usd,
           actual_cost_usd: result.total_cost_usd,
           net_cost_saved_usd: result.net_cost_saved_usd,
@@ -138,6 +141,7 @@ async function startServer() {
         workflow_id,
         policy: activePreset,
         pass_through: config.pass_through,
+        measure_baseline: false,
       });
 
       res.json({
@@ -152,7 +156,9 @@ async function startServer() {
         },
         ael_economics: {
           confidence_signal: result.confidence_signal,
-          net_tokens_saved: Math.max(0, result.baseline_tokens - result.total_tokens),
+          baseline_source: result.baseline_source,
+          ...(result.assumed_baseline ? { assumed_baseline: result.assumed_baseline } : {}),
+          net_tokens_saved: result.net_tokens_saved,
           net_cost_saved_usd: result.net_cost_saved_usd,
         },
       });

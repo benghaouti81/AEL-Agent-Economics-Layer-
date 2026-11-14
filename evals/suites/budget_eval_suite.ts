@@ -923,11 +923,15 @@ export async function runBudgetEvalSuite(
     const baselineRes = await llm.complete(tc.query, { reasoning_effort: 'high' });
     cumulativeCostUsd += baselineRes.cost_usd;
 
-    // 2. Measure AEL routed output
+    // 2. Measure AEL routed output against measured reference baseline
     const res = await engine.routeAndExecute(tc.query, {
       workflow_id: `eval_${split}`,
       task_category: categoryKey,
       policy: DEFAULT_PRESETS.balanced,
+      reference_baseline: {
+        total_tokens: baselineRes.total_tokens,
+        cost_usd: baselineRes.cost_usd,
+      },
     });
     cumulativeCostUsd += res.total_cost_usd;
 
@@ -964,7 +968,7 @@ export async function runBudgetEvalSuite(
 
   for (const [cat, stat] of Object.entries(catStats)) {
     if (stat.total === 0) continue;
-    const tokenReduct = Math.max(0, ((stat.baselineTok - stat.actualTok) / stat.baselineTok) * 100);
+    const tokenReduct = ((stat.baselineTok - stat.actualTok) / stat.baselineTok) * 100;
     const netSavedUsd = Number((stat.baseCost - stat.actCost).toFixed(5));
     const acc = Number((stat.correct / stat.total).toFixed(4));
     const baselineAcc = Number((stat.baseCorrect / stat.total).toFixed(4));
@@ -1005,7 +1009,7 @@ export async function runBudgetEvalSuite(
 
   allOverheads.sort((a, b) => a - b);
   const overallP95 = allOverheads[Math.floor(allOverheads.length * 0.95)] ?? 0;
-  const overallTokenReduct = Math.max(0, ((totalBaseTok - totalActTok) / totalBaseTok) * 100);
+  const overallTokenReduct = ((totalBaseTok - totalActTok) / totalBaseTok) * 100;
   const overallNetSavings = Number((totalBaseCost - totalActCost).toFixed(5));
   const usdPerTaskBaseline = Number((totalBaseCost / testCases.length).toFixed(5));
   const usdPerTaskAel = Number((totalActCost / testCases.length).toFixed(5));

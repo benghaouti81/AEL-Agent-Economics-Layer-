@@ -41,4 +41,36 @@ describe('DecisionLogStore', () => {
     expect(summary.percent_tokens_saved).toBe(75);
     expect(summary.usd_per_completed_task_ael).toBeGreaterThan(0);
   });
+
+  it('preserves negative net_tokens_saved and negative summary percentages without flooring to zero', () => {
+    const store = new DecisionLogStore(':memory:');
+
+    store.insertDecision({
+      id: 'd_neg',
+      timestamp: Date.now(),
+      workflow_id: 'loss_wf',
+      query_hash: 'q_neg',
+      task_category: 'math',
+      schema_hash: 's1',
+      baseline_tokens: 200,
+      upstream_tokens: 150,
+      ael_internal_tokens: 250,
+      net_tokens_saved: -200,
+      baseline_cost_usd: 0.0002,
+      upstream_cost_usd: 0.00015,
+      ael_internal_cost_usd: 0.00025,
+      net_cost_saved_usd: -0.0002,
+      latency_ms: 40,
+      ael_overhead_ms: 2,
+      completed_successfully: true,
+    } as any);
+
+    const { decisions } = store.getRecentDecisions(1, 10);
+    expect(decisions[0].net_tokens_saved).toBe(-200);
+
+    const summary = store.getSummary();
+    expect(summary.total_net_tokens_saved).toBe(-200);
+    expect(summary.percent_tokens_saved).toBeLessThan(0);
+    expect(summary.percent_cost_saved).toBeLessThan(0);
+  });
 });

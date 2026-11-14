@@ -50,11 +50,19 @@ export class CircuitBreakerController {
     }
 
     const netSavings = recent.reduce((sum, r) => sum + r.net_cost_saved_usd, 0);
+    const netTokensSaved = recent.reduce((sum, r) => sum + r.net_tokens_saved, 0);
     const failureCount = recent.filter(r => !r.completed_successfully).length;
     const errorRate = failureCount / recent.length;
 
     if (netSavings <= this.config.min_net_savings_usd) {
       const reason = `Negative net savings detected over rolling window of ${recent.length} requests: $${netSavings.toFixed(5)} <= $${this.config.min_net_savings_usd}`;
+      this.trippedWorkflows.set(workflow_id, { tripped: true, reason, timestamp: Date.now() });
+      console.warn(`[AEL Circuit Breaker] TRIPPED for workflow '${workflow_id}': ${reason}`);
+      return { tripped: true, reason };
+    }
+
+    if (netTokensSaved < 0) {
+      const reason = `Negative net token savings detected over rolling window of ${recent.length} requests: ${netTokensSaved} tokens`;
       this.trippedWorkflows.set(workflow_id, { tripped: true, reason, timestamp: Date.now() });
       console.warn(`[AEL Circuit Breaker] TRIPPED for workflow '${workflow_id}': ${reason}`);
       return { tripped: true, reason };

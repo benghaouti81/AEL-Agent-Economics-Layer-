@@ -122,9 +122,11 @@ export const DecisionsTable: React.FC<DecisionsTableProps> = ({
                     <td className="py-2.5 px-4 text-right tabular-nums whitespace-nowrap">
                       <span className="text-slate-300">{actualTokens}</span>
                       <span className="text-slate-600 mx-1">/</span>
-                      <span className="text-emerald-400">+{d.net_tokens_saved}</span>
+                      <span className={d.net_tokens_saved >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+                        {d.net_tokens_saved >= 0 ? `+${d.net_tokens_saved}` : d.net_tokens_saved}
+                      </span>
                     </td>
-                    <td className="py-2.5 px-4 text-right tabular-nums text-emerald-400 whitespace-nowrap">
+                    <td className={`py-2.5 px-4 text-right tabular-nums whitespace-nowrap ${d.net_cost_saved_usd >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                       ${d.net_cost_saved_usd.toFixed(4)}
                     </td>
                     <td className="py-2.5 px-4 text-right tabular-nums text-slate-400 whitespace-nowrap">
