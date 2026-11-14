@@ -83,6 +83,22 @@ Savings claims come exclusively from a separate comparative benchmark
 (AEL vs baseline on identical samples), labeled as such in results and README.
 P0-16 budget_verifiers.ts + README: label the node:vm code verifier as a
 functional check, NOT a security sandbox; no untrusted-code execution claims.
+
+P0-17 src/llm/client.ts: wire reasoning_effort to Gemini's real thinking
+control — map effort levels to thinkingConfig.thinkingBudget (Gemini 2.5) or
+thinkingLevel where supported, per provider profile; verify with a test that
+callGemini actually sends the thinking config.
+P0-18 src/llm/client.ts: read reasoning tokens from the correct field
+(usageMetadata.thoughtsTokenCount, falling back gracefully), and add a test
+asserting reasoning tokens + total cost include them.
+P0-19 budget_verifiers.ts: execute model-generated code in a separate child
+process with a sanitized environment (no API keys or secrets inherited);
+keep timeout; document the isolation boundary honestly.
+P0-20 budget_eval_suite.ts: report verifier/judge costs separately from
+product costs (stat.baseCost/actCost) as a disclosed 'verification_cost'
+field; extend scripts/verify-dod.ts to FAIL if any evals/results file is
+older than the latest commit touching src/ or evals/ (staleness gate).
+After P0-17..P0-20: regenerate ALL eval results so they postdate every fix.
      
 
 ## 4. CI HARDENING (after P0, two commits)
