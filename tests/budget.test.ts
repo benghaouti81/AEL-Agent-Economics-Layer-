@@ -54,10 +54,11 @@ describe('Budget Engine & Circuit Breaker', () => {
     expect(res.ael_overhead_ms).toBeGreaterThanOrEqual(0);
   });
 
-  it('records confidence signals adhering to the 4-tier taxonomy', async () => {
+  it('emits unavailable instead of consensus when single-regime probe has no logprob_confidence', async () => {
     const res = await engine.routeAndExecute('What is 2 + 2?');
-    const validSignals = ['externally_verified', 'model_confidence', 'consensus', 'insufficient_evidence'];
+    const validSignals = ['externally_verified', 'model_confidence', 'consensus', 'insufficient_evidence', 'unavailable'];
     expect(validSignals).toContain(res.confidence_signal);
+    expect(res.confidence_signal).toBe('unavailable');
   });
 
   it('trips circuit breaker when rolling net savings drop below zero', () => {

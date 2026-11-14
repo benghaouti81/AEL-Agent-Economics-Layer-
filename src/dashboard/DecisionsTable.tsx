@@ -117,6 +117,7 @@ export const DecisionsTable: React.FC<DecisionsTableProps> = ({
                       {d.confidence_signal === 'model_confidence' && <span className="text-cyan-400">model-conf</span>}
                       {d.confidence_signal === 'consensus' && <span className="text-blue-400">consensus</span>}
                       {d.confidence_signal === 'insufficient_evidence' && <span className="text-slate-400">insufficient</span>}
+                      {d.confidence_signal === 'unavailable' && <span className="text-slate-500">unavailable</span>}
                     </td>
                     <td className="py-2.5 px-4 text-right tabular-nums whitespace-nowrap">
                       <span className="text-slate-300">{actualTokens}</span>

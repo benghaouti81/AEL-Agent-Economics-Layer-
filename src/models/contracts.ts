@@ -37,9 +37,10 @@ export type ToolRecordInput = z.input<typeof ToolRecordSchema>;
 // ==========================================
 export const ConfidenceLevelSchema = z.enum([
   'externally_verified', // Programmatic check, dry-run outcome, or deterministic tool validation
-  'model_confidence',    // Provider-reported logprobs or token confidence metrics
+  'model_confidence',    // Provider-reported logprobs or token confidence metrics (or LLM-Judge verification step)
   'consensus',           // Agreement among k samples (stopping heuristic, NOT proof of correctness)
   'insufficient_evidence', // Escalation trigger or policy halt
+  'unavailable',         // No confidence signal available (single probe without provider logprobs or consensus check)
 ]);
 export type ConfidenceLevel = z.infer<typeof ConfidenceLevelSchema>;
 

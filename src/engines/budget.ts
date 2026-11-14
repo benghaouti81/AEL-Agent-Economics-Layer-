@@ -136,7 +136,7 @@ export class BudgetEngine {
         confidenceSignal = 'model_confidence';
         shouldEscalate = false;
       } else {
-        confidenceSignal = 'consensus';
+        confidenceSignal = 'unavailable';
         shouldEscalate = false;
       }
       aelOverheadMs += performance.now() - decisionStep1Start;

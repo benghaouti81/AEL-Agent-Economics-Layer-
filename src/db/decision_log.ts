@@ -156,7 +156,7 @@ export class DecisionLogStore {
         p95_latency_ms: 0,
         p95_ael_overhead_ms: 0,
         escalation_distribution: { none: 0, low: 0, medium: 0, high: 0 },
-        confidence_distribution: { externally_verified: 0, model_confidence: 0, consensus: 0, insufficient_evidence: 0 },
+        confidence_distribution: { externally_verified: 0, model_confidence: 0, consensus: 0, insufficient_evidence: 0, unavailable: 0 },
         circuit_breaker_tripped_workflows: [],
       };
     }
@@ -203,6 +203,7 @@ export class DecisionLogStore {
       model_confidence: 0,
       consensus: 0,
       insufficient_evidence: 0,
+      unavailable: 0,
     };
     for (const r of confRows) {
       confidence_distribution[r.confidence_signal] = r.cnt;

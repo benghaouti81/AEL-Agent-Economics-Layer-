@@ -25,6 +25,7 @@ export const EscalationChart: React.FC<EscalationChartProps> = ({ summary }) => 
     { label: 'Model Confidence', count: summary.confidence_distribution.model_confidence || 0, color: 'text-cyan-400' },
     { label: 'Consensus (k Samples)', count: summary.confidence_distribution.consensus || 0, color: 'text-blue-400' },
     { label: 'Insufficient Evidence', count: summary.confidence_distribution.insufficient_evidence || 0, color: 'text-amber-400' },
+    { label: 'Unavailable', count: summary.confidence_distribution.unavailable || 0, color: 'text-slate-400' },
   ];
 
   return (
