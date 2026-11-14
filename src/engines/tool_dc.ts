@@ -88,47 +88,101 @@ export class ToolDCEngine {
       if (cached.schema_hash === schema_hash) {
         const tool = this.registry.getTool(cached.tool_name);
         if (tool) {
-          const execRes = await this.sandbox.executeLive(tool, cached.args, approval);
-          this.logDecision({
-            workflow_id,
-            query_hash,
-            schema_hash,
-            task_category: 'mcp_tool_selection',
-            tool_chosen: cached.tool_name,
-            tool_args_hash: crypto.createHash('sha256').update(JSON.stringify(cached.args)).digest('hex').substring(0, 12),
-            retries_count: 0,
-            dry_run_executed: false,
-            dry_run_passed: true,
-            dry_run_caught_error: null,
-            human_approval_granted: approval,
-            baseline_tokens: baselineTokens,
-            upstream_tokens: 0,
-            ael_internal_tokens: 0,
-            net_tokens_saved: baselineTokens,
-            baseline_cost_usd: baselineCostUsd,
-            upstream_cost_usd: 0,
-            ael_internal_cost_usd: 0,
-            net_cost_saved_usd: baselineCostUsd,
-            latency_ms: Date.now() - startTime,
-            ael_overhead_ms: 2,
-            completed_successfully: execRes.success,
-            pass_through: false,
-          });
+          const decisionStart = performance.now();
+          const validation = this.registry.validateArguments(tool.name, cached.args);
+          if (!validation.valid) {
+            this.cache.delete(cacheKey);
+          } else {
+            // Side-effect & dry-run safety policy MUST still be evaluated on every cache hit
+            const dryRunResult = await this.sandbox.evaluateDryRun(tool, cached.args, approval);
+            const aelOverheadMs = Math.max(0, Math.round(performance.now() - decisionStart));
 
-          return {
-            success: execRes.success,
-            tool_name: cached.tool_name,
-            arguments: cached.args,
-            retries: 0,
-            dry_run: null,
-            cached: true,
-            execution_result: execRes.result,
-            error: execRes.error,
-            overhead_tokens: 0,
-            overhead_cost_usd: 0,
-            baseline_tokens: baselineTokens,
-            baseline_cost_usd: baselineCostUsd,
-          };
+            if (dryRunResult.executed && !dryRunResult.passed) {
+              this.cache.delete(cacheKey);
+              const catchErr = dryRunResult.error || 'Dry-run runtime assertion failed on cached plan';
+              this.logDecision({
+                workflow_id,
+                query_hash,
+                schema_hash,
+                task_category: 'mcp_tool_selection',
+                tool_chosen: cached.tool_name,
+                tool_args_hash: crypto.createHash('sha256').update(JSON.stringify(cached.args)).digest('hex').substring(0, 12),
+                retries_count: 0,
+                dry_run_executed: true,
+                dry_run_passed: false,
+                dry_run_caught_error: catchErr,
+                human_approval_granted: approval,
+                baseline_tokens: baselineTokens,
+                upstream_tokens: 0,
+                ael_internal_tokens: 0,
+                net_tokens_saved: baselineTokens,
+                baseline_cost_usd: baselineCostUsd,
+                upstream_cost_usd: 0,
+                ael_internal_cost_usd: 0,
+                net_cost_saved_usd: baselineCostUsd,
+                latency_ms: Date.now() - startTime,
+                ael_overhead_ms: aelOverheadMs,
+                completed_successfully: false,
+                pass_through: false,
+              });
+
+              return {
+                success: false,
+                tool_name: cached.tool_name,
+                arguments: cached.args,
+                retries: 0,
+                dry_run: dryRunResult,
+                cached: true,
+                error: catchErr,
+                overhead_tokens: 0,
+                overhead_cost_usd: 0,
+                baseline_tokens: baselineTokens,
+                baseline_cost_usd: baselineCostUsd,
+              };
+            }
+
+            const execRes = await this.sandbox.executeLive(tool, cached.args, approval);
+            this.logDecision({
+              workflow_id,
+              query_hash,
+              schema_hash,
+              task_category: 'mcp_tool_selection',
+              tool_chosen: cached.tool_name,
+              tool_args_hash: crypto.createHash('sha256').update(JSON.stringify(cached.args)).digest('hex').substring(0, 12),
+              retries_count: 0,
+              dry_run_executed: dryRunResult.executed,
+              dry_run_passed: dryRunResult.executed ? dryRunResult.passed : null,
+              dry_run_caught_error: null,
+              human_approval_granted: approval,
+              baseline_tokens: baselineTokens,
+              upstream_tokens: 0,
+              ael_internal_tokens: 0,
+              net_tokens_saved: baselineTokens,
+              baseline_cost_usd: baselineCostUsd,
+              upstream_cost_usd: 0,
+              ael_internal_cost_usd: 0,
+              net_cost_saved_usd: baselineCostUsd,
+              latency_ms: Date.now() - startTime,
+              ael_overhead_ms: aelOverheadMs,
+              completed_successfully: execRes.success,
+              pass_through: false,
+            });
+
+            return {
+              success: execRes.success,
+              tool_name: cached.tool_name,
+              arguments: cached.args,
+              retries: 0,
+              dry_run: dryRunResult,
+              cached: true,
+              execution_result: execRes.result,
+              error: execRes.error,
+              overhead_tokens: 0,
+              overhead_cost_usd: 0,
+              baseline_tokens: baselineTokens,
+              baseline_cost_usd: baselineCostUsd,
+            };
+          }
         }
       }
     }
