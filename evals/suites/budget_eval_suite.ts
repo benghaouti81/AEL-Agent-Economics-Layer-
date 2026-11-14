@@ -4,7 +4,7 @@
  * Expands to 50 held-out queries per category (200 total queries) across:
  * - factual / reasoning lookup (50) — verified via LLM judge verdict
  * - multi-step math/logic (50) — verified via numeric ground-truth match
- * - code synthesis/debugging (50) — verified via esbuild TS compilation + node:vm assertion execution
+ * - code synthesis/debugging (50) — verified via esbuild TS compilation + node:vm functional assertion check (NOT a security sandbox)
  * - structured data extraction (50) — verified via JSON parsing + expected field match
  *
  * NOTE ON VALIDATION INTEGRITY:

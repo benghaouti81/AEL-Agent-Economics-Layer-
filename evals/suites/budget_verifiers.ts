@@ -1,7 +1,7 @@
 /**
  * AEL — Real Per-Category Verification for Thinking Budget Evaluation Suite (P0-9)
  * - math: numeric match (exact / tolerance)
- * - code: TypeScript/JavaScript compilation via esbuild + isolated node:vm execution & assertions
+ * - code: TypeScript/JavaScript compilation via esbuild + functional node:vm assertion check (NOT a security sandbox; no untrusted-code execution claims)
  * - extraction: JSON parsing & expected field matching
  * - reasoning/factual: LLM judge verdict against reference answer (never accepts empty/boilerplate)
  * @license Apache-2.0
@@ -94,7 +94,11 @@ export function verifyMathNumericMatch(
 }
 
 /**
- * Compiles TypeScript/JavaScript from response text using esbuild and runs assertions in an isolated vm context.
+ * Compiles TypeScript/JavaScript from response text using esbuild and runs functional assertions
+ * in a `node:vm` context.
+ *
+ * SECURITY NOTICE: `node:vm` is used strictly as a functional correctness check for benchmark
+ * assertions. It is NOT a security sandbox and does NOT safely isolate untrusted code execution.
  */
 export function verifyCodeAssertionExecution(
   responseText: string,
@@ -109,7 +113,7 @@ export function verifyCodeAssertionExecution(
   const fenceMatch = responseText.match(/```(?:typescript|ts|javascript|js)?\s*\n([\s\S]*?)```/i);
   let rawCode = fenceMatch ? fenceMatch[1] : responseText;
 
-  // Strip ESM export keywords so function declarations bind cleanly into vm sandbox global
+  // Strip ESM export keywords so function declarations bind cleanly into the vm context global
   rawCode = rawCode
     .replace(/^\s*import\s+[\s\S]*?;\s*$/gm, '')
     .replace(/\bexport\s+default\s+/g, '')
@@ -131,12 +135,13 @@ export function verifyCodeAssertionExecution(
   }
 
   try {
+    // Functional check only (NOT a security sandbox / NOT for untrusted code execution).
     // Only inject Node's assert; keep VM-native intrinsics (Array, Map, Set, Date, Object)
     // so `new Array(...)` / `new Map()` share prototypes with literal expressions in assertions.
-    const sandbox: Record<string, any> = {
+    const vmContextGlobals: Record<string, any> = {
       assert,
     };
-    const context = vm.createContext(sandbox);
+    const context = vm.createContext(vmContextGlobals);
     vm.runInContext(jsCode, context, { timeout: 200 });
 
     const fnCheck = vm.runInContext(`typeof ${functionName} === 'function'`, context, { timeout: 50 });
