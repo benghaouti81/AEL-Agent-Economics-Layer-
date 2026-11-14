@@ -179,6 +179,7 @@ function checkEvalsAndReadme(): void {
     { label: 'budget usd_per_task_baseline', token: `$${Number(budgetJson.usd_per_task_baseline).toFixed(5)}` },
     { label: 'budget usd_per_task_ael', token: `$${Number(budgetJson.usd_per_task_ael).toFixed(5)}` },
     { label: 'budget overall p95 overhead', token: `**${budgetJson.overall_p95_overhead_ms} ms**` },
+    { label: 'budget overall baseline accuracy ratio', token: String(budgetJson.overall_baseline_accuracy_ratio) },
     { label: 'budget overall accuracy ratio', token: String(budgetJson.overall_accuracy_ratio) },
   ];
 
@@ -188,6 +189,7 @@ function checkEvalsAndReadme(): void {
       { label: `${cat} actual tokens`, token: Number(m.actual_tokens).toLocaleString('en-US') },
       { label: `${cat} token reduction %`, token: `**${m.token_reduction_pct}%** (\`${m.token_reduction_ratio}\`)` },
       { label: `${cat} net savings`, token: `+$${Number(m.net_cost_saved_usd).toFixed(5)}` },
+      { label: `${cat} baseline accuracy ratio`, token: String(m.baseline_accuracy_ratio) },
       { label: `${cat} accuracy ratio`, token: String(m.accuracy_ratio) },
     );
   }

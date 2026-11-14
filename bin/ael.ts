@@ -135,13 +135,13 @@ program
       console.log(`Live API Credentials:     ${budgetRes.live_api_credentials_present ? `YES (${budgetRes.provider_source})` : `NONE (${budgetRes.provider_source} smoke mode)`}`);
       console.log(`Total Evaluated Queries:  ${budgetRes.total_queries} (50 per category across 4 mixed categories)`);
       console.log(`Overall Token Reduction:  ${budgetRes.overall_token_reduction_pct}% (${budgetRes.overall_token_reduction_ratio})`);
-      console.log(`Accuracy Delta:           ${budgetRes.accuracy_drop_pp} pp (${budgetRes.overall_accuracy_ratio})`);
+      console.log(`Accuracy Delta:           ${budgetRes.accuracy_drop_pp} pp (Base ${budgetRes.overall_baseline_accuracy_ratio} -> AEL ${budgetRes.overall_accuracy_ratio})`);
       console.log(`p95 Decision Overhead:    ${budgetRes.overall_p95_overhead_ms} ms (Criteria < 500ms: ${budgetRes.overall_p95_overhead_ms < 500 ? 'PASS' : 'FAIL'})`);
       console.log(`Net Cost Saved (USD):     $${budgetRes.overall_net_savings_usd.toFixed(4)}`);
       
       console.log('\n--- Breakdown per Category (50 queries each) ---');
       for (const [cat, metric] of Object.entries(budgetRes.categories)) {
-        console.log(`Category [${cat.padEnd(10, ' ')}]: N=${metric.total_samples}, Token Savings = ${metric.token_reduction_pct}% (${metric.token_reduction_ratio}), Acc = ${(metric.accuracy * 100).toFixed(1)}% (${metric.accuracy_ratio}), Net Saved = $${metric.net_cost_saved_usd.toFixed(4)}`);
+        console.log(`Category [${cat.padEnd(10, ' ')}]: N=${metric.total_samples} [${metric.verification_method}], Token Savings = ${metric.token_reduction_pct}% (${metric.token_reduction_ratio}), BaseAcc = ${(metric.baseline_accuracy * 100).toFixed(1)}% (${metric.baseline_accuracy_ratio}), AELAcc = ${(metric.accuracy * 100).toFixed(1)}% (${metric.accuracy_ratio}), Net Saved = $${metric.net_cost_saved_usd.toFixed(4)}`);
       }
 
       console.log(`\nEvidence File:            evals/results/${budgetFile}`);

@@ -22,11 +22,11 @@ Both engines write to a unified, file-backed **SQLite Decision Log (`better-sqli
 | :---: | :--- | :--- | :---: |
 | **#1** | $\ge 90\%$ tool-selection accuracy ($\le 3$ retries) on real model API | `evals/results/2026-11-13_tool_selection.json` (`provider_source: mock_simulator`)<br>Command: `AEL_ALLOW_MOCK=1 npx tsx bin/ael.ts eval --suite tool`<br>Offline smoke result: **90.0% accuracy (9/10)**, avg **0** retries across 10 selection cases (13 total cases = 10 selection + 3 dry-run catch) | **NOT VALIDATED**<br>*(Smoke run via `mock_simulator`; live model eval pending)* |
 | **#2** | $\ge 3$ dry-run safety catches of wrong tools | `evals/results/2026-11-13_tool_selection.json` (`provider_source: mock_simulator`)<br>Offline smoke result: **3/3 catches** (missing file, unauthorized SQL, empty query) | **NOT VALIDATED**<br>*(Smoke run via `mock_simulator`; live model eval pending)* |
-| **#3** | $\ge 50\%$ reasoning token reduction ($\le 2\text{pp}$ accuracy drop) on real model API | `evals/results/2026-11-13_budget_held_out.json` (`provider_source: mock_simulator`)<br>Command: `AEL_ALLOW_MOCK=1 npx tsx bin/ael.ts eval --suite budget --split held_out`<br>Offline smoke result: **69.2% token reduction (130966/189162)**; no live API key in environment | **NOT VALIDATED**<br>*(Requires live API credentials)* |
-| **#4** | USD per completed task reduction on real model API | `evals/results/2026-11-13_budget_held_out.json` (`provider_source: mock_simulator`)<br>Offline smoke result: **$0.00056** $\to$ **$0.00015** per task (+$0.08109 net saved across 200 queries) | **NOT VALIDATED**<br>*(Requires live API credentials)* |
-| **#5** | Evaluation diversity across 4 mixed categories (50 queries each, held-out split) | `evals/suites/budget_eval_suite.ts` + `evals/results/2026-11-13_budget_held_out.json`<br>200 held-out queries (`50/50` factual, `50/50` math, `50/50` code, `50/50` extraction) | **NOT VALIDATED**<br>*(Dataset implemented; live execution pending API key)* |
+| **#3** | $\ge 50\%$ reasoning token reduction ($\le 2\text{pp}$ accuracy drop) on real model API | `evals/results/2026-11-14_budget_held_out.json` (`provider_source: mock_simulator`)<br>Command: `AEL_ALLOW_MOCK=1 npx tsx bin/ael.ts eval --suite budget --split held_out`<br>Offline smoke result: **69.4% token reduction (`131982/190122`)**, Base `0/200` $\to$ AEL `0/200` under real verifiers; no live API key in environment | **NOT VALIDATED**<br>*(Requires live API credentials)* |
+| **#4** | USD per completed task reduction on real model API | `evals/results/2026-11-14_budget_held_out.json` (`provider_source: mock_simulator`)<br>Offline smoke result: **$0.00056** $\to$ **$0.00015** per task (+$0.08184 net saved across 200 queries) | **NOT VALIDATED**<br>*(Requires live API credentials)* |
+| **#5** | Evaluation diversity across 4 mixed categories (50 queries each, held-out split) | `evals/suites/budget_eval_suite.ts` + `evals/results/2026-11-14_budget_held_out.json`<br>200 held-out queries (`50/50` factual, `50/50` math, `50/50` code, `50/50` extraction) | **NOT VALIDATED**<br>*(Dataset implemented; live execution pending API key)* |
 | **#6** | Negative-savings circuit breaker auto-trip to pass-through | `tests/circuit_breaker_e2e.test.ts`<br>Verified in CI: rolling net savings $\le 0$ trips breaker, subsequent requests run in pass-through mode, surfaces on CLI & dashboard | **PASS** |
-| **#7** | Middleware decision overhead p95 $< 500\text{ms}$ | `evals/results/2026-11-13_budget_held_out.json` (`overall_p95_overhead_ms`)<br>Measured p95 decision overhead (`performance.now()` excluding LLM I/O): **0 ms** | **PASS** |
+| **#7** | Middleware decision overhead p95 $< 500\text{ms}$ | `evals/results/2026-11-14_budget_held_out.json` (`overall_p95_overhead_ms`)<br>Measured p95 decision overhead (`performance.now()` excluding LLM I/O): **0 ms** | **PASS** |
 | **#8** | End-to-end runnable demonstration in `examples/` | `examples/agent_workflow_demo.ts`<br>Executed cleanly end-to-end via `AEL_ALLOW_MOCK=1 npx tsx examples/agent_workflow_demo.ts` | **PASS** |
 | **#9** | Code quality: $\ge 80\%$ test coverage on engines, clean `tsc --strict` | `vitest run --coverage`<br>34 tests passed across 10 files. Engines: **86.9% Stmts**, Config: **100% Stmts**, Gateway: **95% Stmts**, DB: **89.09% Stmts** | **PASS** |
 
@@ -48,29 +48,29 @@ Both engines write to a unified, file-backed **SQLite Decision Log (`better-sqli
 | **Dry-Run Mode Enforcement** | Mutating tools blocked from execution | **100.0% enforced** *(1/1 mutating tool `fin_transfer_funds` blocked as `schema_only`; source: `2026-11-13_tool_selection.json`)* | **NOT VALIDATED** *(Smoke threshold met)* |
 
 ### 2. Thinking Budget Engine (AERA / CoBa on 200 Held-Out Queries — Offline Smoke Run)
-- **Source**: `evals/results/2026-11-13_budget_held_out.json`
+- **Source**: `evals/results/2026-11-14_budget_held_out.json`
 - **Run Command**: `npx tsx bin/ael.ts eval --suite budget --split held_out` *(with `AEL_ALLOW_MOCK=1`)*
-- **Execution Date**: 2026-11-13
+- **Execution Date**: 2026-11-14
 - **Provider Source**: `mock_simulator` (`NOT VALIDATED (No live upstream API credentials configured)`)
-- **Dataset Composition**: 200 distinct, high-difficulty queries with zero template cycling:
-  - **Factual (50 distinct)**: Multi-hop history, astrophysics, biochemistry, sovereign treaties, cryptography, linguistics.
-  - **Math (50 distinct)**: Modular arithmetic, differential equations, Markov chains, probability, linear algebra, number theory.
-  - **Code (50 distinct)**: Lock-free ring buffers, topological sort, LRU caches, reactive observables, AST visitors, async pools.
-  - **Extraction (50 distinct)**: Nested B2B invoices, clinical vitals, git merge conflicts, Kubernetes audit logs, SEC 10-K filings.
+- **Dataset Composition & Real Verifiers**: 200 distinct, self-contained queries (50 per category) evaluated identically on baseline (`reasoning_effort: high`) and AEL outputs:
+  - **Factual (50 distinct, `judge_verdict`)**: Multi-hop history, astrophysics, biochemistry, sovereign treaties, cryptography, linguistics verified via LLM judge verdict.
+  - **Math (50 distinct, `numeric_match`)**: Modular arithmetic, differential equations, Markov chains, probability, linear algebra, number theory verified via numeric ground-truth match.
+  - **Code (50 distinct, `code_execution`)**: Lock-free ring buffers, topological sort, LRU caches, AST/string algorithms verified via `esbuild` compilation and `node:vm` assertions.
+  - **Extraction (50 distinct, `json_field_match`)**: Self-contained invoices, clinical vitals, audit logs, X.509/SWIFT payloads verified via JSON field equality.
 
-| Task Category | Evaluated Queries | Baseline Tokens | AEL Actual Tokens | Token Reduction | Baseline Accuracy | AEL Accuracy | Net USD Saved |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Factual Lookup** | 50 unique | 47,345 | 7,916 | **83.3%** (`39429/47345`) | 96.0% | 100.0% (`50/50`) | +$0.02381 |
-| **Multi-step Math / Logic** | 50 unique | 47,103 | 21,830 | **53.7%** (`25273/47103`) | 96.0% | 100.0% (`50/50`) | +$0.01631 |
-| **Code Synthesis / Debug** | 50 unique | 47,181 | 21,989 | **53.4%** (`25192/47181`) | 96.0% | 100.0% (`50/50`) | +$0.01629 |
-| **Structured Extraction** | 50 unique | 47,533 | 6,461 | **86.4%** (`41072/47533`) | 96.0% | 100.0% (`50/50`) | +$0.02467 |
-| **TOTAL (HELD-OUT)** | **200 distinct** | **189,162** | **58,196** | **69.2%** (`130966/189162`) | **96.0%** | **100.0%** (`200/200`) | **+$0.08109** |
+| Task Category | Evaluated Queries | Verifier | Baseline Tokens | AEL Actual Tokens | Token Reduction | Baseline Accuracy | AEL Accuracy | Net USD Saved |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Factual Lookup** | 50 unique | `judge_verdict` | 47,102 | 6,350 | **86.5%** (`40752/47102`) | 0.0% (`0/50`) | 0.0% (`0/50`) | +$0.02450 |
+| **Multi-step Math / Logic** | 50 unique | `numeric_match` | 47,064 | 21,745 | **53.8%** (`25319/47064`) | 0.0% (`0/50`) | 0.0% (`0/50`) | +$0.01631 |
+| **Code Synthesis / Debug** | 50 unique | `code_execution` | 47,862 | 23,351 | **51.2%** (`24511/47862`) | 0.0% (`0/50`) | 0.0% (`0/50`) | +$0.01619 |
+| **Structured Extraction** | 50 unique | `json_field_match` | 48,094 | 6,694 | **86.1%** (`41400/48094`) | 0.0% (`0/50`) | 0.0% (`0/50`) | +$0.02484 |
+| **TOTAL (HELD-OUT)** | **200 distinct** | *Per-category* | **190,122** | **58,140** | **69.4%** (`131982/190122`) | **0.0%** (`0/200`) | **0.0%** (`0/200`) | **+$0.08184** |
 
-- **p95 Middleware Overhead**: **0 ms** (measured via `performance.now()` excluding LLM I/O; SLO Contract $< 500\text{ms}$: **PASS**; source: `2026-11-13_budget_held_out.json`).
-- **Cost / Completed Task (Offline Smoke)**: Baseline: **$0.00056** $\to$ AEL: **$0.00015** *(source: `2026-11-13_budget_held_out.json`)*.
+- **p95 Middleware Overhead**: **0 ms** (measured via `performance.now()` excluding LLM I/O; SLO Contract $< 500\text{ms}$: **PASS**; source: `2026-11-14_budget_held_out.json`).
+- **Cost / Completed Task (Offline Smoke)**: Baseline: **$0.00056** $\to$ AEL: **$0.00015** *(source: `2026-11-14_budget_held_out.json`)*.
 
 > [!IMPORTANT]
-> **Mock Eval Limitation Disclosure**: The figures above are from the offline synthetic smoke harness (`provider_source: mock_simulator`, `acceptance_status: NOT VALIDATED`) using 200 distinct handcrafted held-out prompts and 13 Tool-DC cases. Per project discipline, these serve as plumbing/control-flow smoke tests, not empirical model benchmark evidence. Live model benchmarking requires configuring `GEMINI_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY`.
+> **Mock Eval Limitation Disclosure**: The figures above are from the offline synthetic smoke harness (`provider_source: mock_simulator`, `acceptance_status: NOT VALIDATED`) using 200 distinct handcrafted held-out prompts and 13 Tool-DC cases. Under `mock_simulator`, synthetic responses do not produce factual, numeric, JSON, or executable code solutions, so the real per-category verifiers honestly score `0/200` on both baseline and AEL (`0.0 pp` delta). Per project discipline, these serve as plumbing/control-flow smoke tests, not empirical model benchmark evidence. Live model benchmarking requires configuring `GEMINI_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY`.
 
 ---
 
