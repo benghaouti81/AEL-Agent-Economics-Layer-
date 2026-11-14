@@ -27,12 +27,31 @@ describe('Budget Eval Per-Category Real Verifiers (P0-9)', () => {
     else process.env.AEL_ALLOW_MOCK = originalAllowMock;
   });
 
-  it('verifies math responses via numeric match and rejects mock boilerplate', () => {
+  it('verifies math responses via final numeric answer only and rejects intermediate-number matches or mock boilerplate (P0-14)', () => {
     expect(verifyMathNumericMatch('The remainder is \\boxed{4}.', 4).passed).toBe(true);
     expect(verifyMathNumericMatch('The tip is $12.69.', 12.69, 0.01).passed).toBe(true);
     expect(verifyMathNumericMatch('34,650 distinct permutations.', 34650).passed).toBe(true);
     expect(verifyMathNumericMatch('The answer is 42.', 4).passed).toBe(false);
     expect(verifyMathNumericMatch('Processed response for query. Verified output.', 4).passed).toBe(false);
+
+    // Intermediate derivation contains 4 (3^4), while final answer is 5 -> MUST fail
+    expect(
+      verifyMathNumericMatch('Step 1: 3^4 = 81 mod 7 = 4, then 4 * 2 = 8. Final Answer: 5', 4).passed
+    ).toBe(false);
+    // Final answer after intermediate work matches -> MUST pass
+    expect(
+      verifyMathNumericMatch('First check a_2 = 14 and a_3 = 46. Therefore a_4 = 146.', 146).passed
+    ).toBe(true);
+    // Multiple boxed values -> last boxed wins
+    expect(
+      verifyMathNumericMatch('Intermediate \\boxed{9}, final determinant is \\boxed{-7}.', -7).passed
+    ).toBe(true);
+    expect(
+      verifyMathNumericMatch('Intermediate \\boxed{-7}, final answer is \\boxed{9}.', -7).passed
+    ).toBe(false);
+    // Trailing fraction evaluated as a single final numeric token
+    expect(verifyMathNumericMatch('The probability is 3/4.', 0.75, 0.01).passed).toBe(true);
+    expect(verifyMathNumericMatch('The probability is 3/4.', 4).passed).toBe(false);
   });
 
   it('verifies code responses by compiling TypeScript via esbuild and executing assertions in node:vm', () => {

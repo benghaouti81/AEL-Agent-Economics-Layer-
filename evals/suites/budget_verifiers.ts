@@ -21,7 +21,8 @@ export interface VerificationResult {
 }
 
 /**
- * Extracts numeric candidates from an LLM response and compares against expected numeric ground truth.
+ * Extracts ONLY the final numeric answer from an LLM response and compares it against
+ * expected numeric ground truth. Intermediate numbers earlier in the derivation are ignored.
  */
 export function verifyMathNumericMatch(
   responseText: string,
@@ -32,45 +33,63 @@ export function verifyMathNumericMatch(
     return { passed: false, method: 'numeric_match', detail: 'Empty response' };
   }
 
-  // Prefer boxed or explicitly highlighted final answers if present
-  const boxedMatch = responseText.match(/\\boxed\{([^}]+)\}/);
-  const searchRegion = boxedMatch ? boxedMatch[1] : responseText;
-
-  // Match integers, decimals, scientific notation, and fractions (e.g. 3/4)
-  const fractionMatches = Array.from(searchRegion.matchAll(/(-?\d+(?:\.\d+)?)\s*\/\s*(-?\d+(?:\.\d+)?)/g));
-  const candidates: number[] = [];
-
-  for (const fm of fractionMatches) {
-    const num = Number(fm[1]);
-    const den = Number(fm[2]);
-    if (Number.isFinite(num) && Number.isFinite(den) && den !== 0) {
-      candidates.push(num / den);
-    }
+  // 1. Prefer the LAST \boxed{...} expression if present; otherwise check the last explicit
+  //    answer marker line; otherwise fall back to the full response text.
+  const boxedMatches = Array.from(responseText.matchAll(/\\boxed\{([^{}]+)\}/g));
+  let searchRegion: string;
+  if (boxedMatches.length > 0) {
+    searchRegion = boxedMatches[boxedMatches.length - 1][1];
+  } else {
+    const markerMatches = Array.from(
+      responseText.matchAll(/(?:####|(?:final\s+answer|the\s+answer\s+is|answer\s+is|answer)\s*[:=]?)\s*([^\n]+)/gi)
+    );
+    searchRegion = markerMatches.length > 0
+      ? markerMatches[markerMatches.length - 1][1]
+      : responseText;
   }
 
-  const cleaned = searchRegion.replace(/(\d),(\d{3})\b/g, '$1$2');
-  const numMatches = cleaned.match(/-?\d+(?:\.\d+)?(?:e[+-]?\d+)?/gi) || [];
-  for (const raw of numMatches) {
-    const val = Number(raw);
-    if (Number.isFinite(val)) {
-      candidates.push(val);
+  // 2. Normalize thousand-separator commas (e.g. 34,650 -> 34650, 1,234,567 -> 1234567)
+  let cleaned = searchRegion;
+  let prevCleaned = '';
+  while (cleaned !== prevCleaned) {
+    prevCleaned = cleaned;
+    cleaned = cleaned.replace(/(\d),(\d{3})(?!\d)/g, '$1$2');
+  }
+
+  // 3. Scan numeric tokens strictly left-to-right (fractions evaluated in place so 3/4 is one token 0.75)
+  const tokenRegex = /(?<![\w.])(-?\d+(?:\.\d+)?)\s*\/\s*(-?\d+(?:\.\d+)?)|(?<![\w.])(-?\d+(?:\.\d+)?(?:e[+-]?\d+)?)/gi;
+  const candidates: number[] = [];
+
+  for (const match of cleaned.matchAll(tokenRegex)) {
+    if (match[1] !== undefined && match[2] !== undefined) {
+      const num = Number(match[1]);
+      const den = Number(match[2]);
+      if (Number.isFinite(num) && Number.isFinite(den) && den !== 0) {
+        candidates.push(num / den);
+      }
+    } else if (match[3] !== undefined) {
+      const val = Number(match[3]);
+      if (Number.isFinite(val)) {
+        candidates.push(val);
+      }
     }
   }
 
   if (candidates.length === 0) {
-    return { passed: false, method: 'numeric_match', detail: 'No numeric value found in response' };
+    return { passed: false, method: 'numeric_match', detail: 'No numeric value found in final answer' };
   }
 
-  // Check last few numbers first (final answer convention), then any candidate
+  // 4. Compare ONLY the final extracted numeric token against ground truth
+  const finalValue = candidates[candidates.length - 1];
   const effectiveTol = Number.isInteger(expectedNumber) ? Math.min(tolerance, 1e-6) : tolerance;
-  const matched = candidates.some(v => Math.abs(v - expectedNumber) <= effectiveTol);
+  const matched = Math.abs(finalValue - expectedNumber) <= effectiveTol;
 
   return {
     passed: matched,
     method: 'numeric_match',
     detail: matched
-      ? `Matched expected ${expectedNumber}`
-      : `Expected ${expectedNumber} (±${effectiveTol}), got candidates [${candidates.slice(-5).join(', ')}]`,
+      ? `Matched final answer ${finalValue} against expected ${expectedNumber}`
+      : `Expected ${expectedNumber} (±${effectiveTol}), got final numeric answer ${finalValue}`,
   };
 }
 
