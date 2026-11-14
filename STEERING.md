@@ -66,6 +66,25 @@ P0-7 evals/results: tool_selection.json says total_cases 13 / accuracy 0.9
      ratio must show numerator/denominator + source; regenerate the file;
      README must match exactly.
 
+P0-12 contracts.ts + budget.ts + README: add 'llm_judge_verdict' as a distinct
+confidence_signal; the LLM-Judge path emits 'llm_judge_verdict' (not
+'model_confidence'), which is reserved for provider-logprob-derived confidence.
+Document all signals' exact meanings in README.
+P0-13 evals: audit ALL 200 ground-truth values — recompute every math task
+programmatically (fix m_7 determinant and m_19 recurrence among any errors
+found), execute every code test, validate every extraction target. Commit the
+corrected dataset with a summary of what changed.
+P0-14 budget_verifiers.ts: verifyMathNumericMatch must extract the FINAL
+answer (last numeric token / answer marker) and compare only that — not any
+number appearing anywhere in the text.
+P0-15 server.ts + budget.ts: live per-request accounting reports ACTUAL
+consumption only; savings are never claimed per-request from a counterfactual.
+Savings claims come exclusively from a separate comparative benchmark
+(AEL vs baseline on identical samples), labeled as such in results and README.
+P0-16 budget_verifiers.ts + README: label the node:vm code verifier as a
+functional check, NOT a security sandbox; no untrusted-code execution claims.
+     
+
 ## 4. CI HARDENING (after P0, two commits)
 C-1 Add a verify-dod stage to ci.yml, failing the build on: (a) eval
     thresholds missed with exit-code checks; (b) magic-number grep lint on
