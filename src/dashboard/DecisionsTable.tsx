@@ -115,6 +115,7 @@ export const DecisionsTable: React.FC<DecisionsTableProps> = ({
                     <td className="py-2.5 px-4 font-sans text-[11px]">
                       {d.confidence_signal === 'externally_verified' && <span className="text-emerald-400">verified</span>}
                       {d.confidence_signal === 'model_confidence' && <span className="text-cyan-400">model-conf</span>}
+                      {d.confidence_signal === 'llm_judge_verdict' && <span className="text-violet-400">llm-judge</span>}
                       {d.confidence_signal === 'consensus' && <span className="text-blue-400">consensus</span>}
                       {d.confidence_signal === 'insufficient_evidence' && <span className="text-slate-400">insufficient</span>}
                       {d.confidence_signal === 'unavailable' && <span className="text-slate-500">unavailable</span>}

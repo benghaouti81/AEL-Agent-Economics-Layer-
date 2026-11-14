@@ -201,6 +201,7 @@ export class DecisionLogStore {
     const confidence_distribution: Record<string, number> = {
       externally_verified: 0,
       model_confidence: 0,
+      llm_judge_verdict: 0,
       consensus: 0,
       insufficient_evidence: 0,
       unavailable: 0,

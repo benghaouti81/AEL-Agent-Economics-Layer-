@@ -61,8 +61,29 @@ describe('BudgetEngine Scaling Regimes & Escalation', () => {
 
     expect(res.escalated).toBe(true);
     expect(res.escalation_levels).toBeGreaterThanOrEqual(1);
-    expect(res.confidence_signal).toBe('model_confidence');
+    expect(res.confidence_signal).toBe('llm_judge_verdict');
     expect(res.ael_internal_tokens).toBeGreaterThan(0);
+  });
+
+  it('reserves model_confidence strictly for provider-reported logprobs on unescalated probes', async () => {
+    const originalComplete = llm.complete.bind(llm);
+    llm.complete = async (prompt, options) => {
+      const base = await originalComplete(prompt, options);
+      return {
+        ...base,
+        logprob_confidence: 0.94,
+        confidence_source: 'provider_logprobs',
+      };
+    };
+
+    const res = await engine.routeAndExecute('What is the capital of Japan?', {
+      policy: DEFAULT_PRESETS.balanced,
+      task_category: 'factual',
+      measure_baseline: false,
+    });
+
+    expect(res.escalated).toBe(false);
+    expect(res.confidence_signal).toBe('model_confidence');
   });
 
   it('respects global pass_through option and logs baseline costs without intervention', async () => {

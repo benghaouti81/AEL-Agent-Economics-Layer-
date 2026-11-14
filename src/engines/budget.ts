@@ -208,7 +208,7 @@ export class BudgetEngine {
       aelInternalCost += judgeRes.cost_usd;
 
       finalResponse = judgeRes;
-      confidenceSignal = 'model_confidence'; // Evaluated and resolved by LLM judge step
+      confidenceSignal = 'llm_judge_verdict'; // Evaluated and resolved by LLM judge step (distinct from provider logprobs)
       aelOverheadMs += performance.now() - judgePostStart;
     }
 

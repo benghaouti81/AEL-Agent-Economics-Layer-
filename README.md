@@ -108,12 +108,13 @@ Every tool registered in AEL must carry an author-declared contract:
 - *Sandbox Rule*: Real dry-runs execute ONLY when `dry_run_support="real"` AND `side_effect` is `"none"` or `"idempotent"`. Mutating tools never execute in dry-run mode. Argument validation NEVER implies authorization: tools requiring human approval require explicit confirmation flags independently of validation checks.
 
 ### 2. Confidence Signal Taxonomy & Self-Consistency Caveat
-AEL classifies decision evidence into five distinct, non-equivalent signals:
-1. `externally_verified`: Deterministic non-LLM check (programmatic JSON schema check, dry-run sandbox outcome, or deterministic tool validation). Never emitted for LLM-only judgments.
-2. `model_confidence`: Provider-reported logprobs exceeding the confidence threshold, or an explicit LLM-Judge verification step after escalation.
-3. `consensus`: Empirical agreement across $k \ge 2$ sampled completions in `sample` mode (never emitted in `single` mode without multi-sample voting).
-4. `insufficient_evidence`: Complexity heuristic or low sample agreement triggered escalation, or request ran in pass-through / policy-halt mode.
-5. `unavailable`: Single-probe completion where the provider supplied no `logprob_confidence` and no multi-sample consensus process ran.
+AEL classifies decision evidence into six distinct, non-equivalent signals:
+1. `externally_verified`: Deterministic non-LLM check (programmatic JSON schema validation, dry-run sandbox outcome, or deterministic tool validation). Never emitted for LLM-only judgments.
+2. `model_confidence`: Reserved strictly for provider-reported logprobs or token confidence metrics exceeding `evidence_confidence_threshold` (`confidence_source: provider_logprobs`). Never emitted by an LLM judge.
+3. `llm_judge_verdict`: Output evaluated and resolved by an explicit LLM-Judge escalation/verification step (`BudgetEngine` escalation path). Distinct from both deterministic external verification and provider logprob metrics.
+4. `consensus`: Empirical agreement across $k \ge 2$ sampled completions in `sample` mode (never emitted in `single` mode without multi-sample voting).
+5. `insufficient_evidence`: Complexity heuristic or low sample agreement triggered escalation, or request ran in pass-through / policy-halt mode.
+6. `unavailable`: Single-probe completion where the provider supplied no `logprob_confidence` and no multi-sample consensus or LLM-judge step ran.
 
 > [!WARNING]
 > **Methodological Note on Consensus**: Self-consistency across $k$ samples is recorded strictly as an empirical stopping heuristic, **NOT** mathematical proof of correctness.

@@ -33,14 +33,15 @@ export type ToolRecord = z.infer<typeof ToolRecordSchema>;
 export type ToolRecordInput = z.input<typeof ToolRecordSchema>;
 
 // ==========================================
-// 2. Confidence Signal Taxonomy (4 Tiers)
+// 2. Confidence Signal Taxonomy (6 Signals)
 // ==========================================
 export const ConfidenceLevelSchema = z.enum([
-  'externally_verified', // Programmatic check, dry-run outcome, or deterministic tool validation
-  'model_confidence',    // Provider-reported logprobs or token confidence metrics (or LLM-Judge verification step)
-  'consensus',           // Agreement among k samples (stopping heuristic, NOT proof of correctness)
-  'insufficient_evidence', // Escalation trigger or policy halt
-  'unavailable',         // No confidence signal available (single probe without provider logprobs or consensus check)
+  'externally_verified',   // Deterministic non-LLM check, dry-run sandbox outcome, or deterministic tool validation
+  'model_confidence',      // Provider-reported logprobs or token confidence metrics only (never LLM judge)
+  'llm_judge_verdict',     // Explicit LLM-Judge escalation/verification verdict
+  'consensus',             // Agreement among k samples in sample mode (stopping heuristic, NOT proof of correctness)
+  'insufficient_evidence', // Escalation trigger, pass-through, or policy halt
+  'unavailable',           // No confidence signal available (single probe without provider logprobs or consensus check)
 ]);
 export type ConfidenceLevel = z.infer<typeof ConfidenceLevelSchema>;
 

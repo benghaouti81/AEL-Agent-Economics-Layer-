@@ -56,7 +56,7 @@ describe('Budget Engine & Circuit Breaker', () => {
 
   it('emits unavailable instead of consensus when single-regime probe has no logprob_confidence', async () => {
     const res = await engine.routeAndExecute('What is 2 + 2?');
-    const validSignals = ['externally_verified', 'model_confidence', 'consensus', 'insufficient_evidence', 'unavailable'];
+    const validSignals = ['externally_verified', 'model_confidence', 'llm_judge_verdict', 'consensus', 'insufficient_evidence', 'unavailable'];
     expect(validSignals).toContain(res.confidence_signal);
     expect(res.confidence_signal).toBe('unavailable');
   });
