@@ -289,10 +289,27 @@ export class LLMClient {
 
     const text = response.text || '';
     const usage = (response as any).usageMetadata || {};
-    const input_tokens = usage.promptTokenCount || Math.ceil(prompt.length / 4);
-    const output_tokens = usage.candidatesTokenCount || Math.ceil(text.length / 4);
-    const reasoning_tokens = usage.reasoningTokenCount || 0;
-    const total_tokens = input_tokens + output_tokens + reasoning_tokens;
+    const input_tokens =
+      typeof usage.promptTokenCount === 'number' && Number.isFinite(usage.promptTokenCount)
+        ? usage.promptTokenCount
+        : Math.ceil(prompt.length / 4);
+    const output_tokens =
+      typeof usage.candidatesTokenCount === 'number' && Number.isFinite(usage.candidatesTokenCount)
+        ? usage.candidatesTokenCount
+        : Math.ceil(text.length / 4);
+    // Gemini @google/genai reports thinking tokens in usageMetadata.thoughtsTokenCount;
+    // fall back gracefully to reasoningTokenCount or 0 if omitted.
+    const rawReasoningTokens =
+      typeof usage.thoughtsTokenCount === 'number'
+        ? usage.thoughtsTokenCount
+        : typeof usage.reasoningTokenCount === 'number'
+          ? usage.reasoningTokenCount
+          : 0;
+    const reasoning_tokens = Number.isFinite(rawReasoningTokens) && rawReasoningTokens > 0 ? rawReasoningTokens : 0;
+    const total_tokens = Math.max(
+      input_tokens + output_tokens + reasoning_tokens,
+      typeof usage.totalTokenCount === 'number' && Number.isFinite(usage.totalTokenCount) ? usage.totalTokenCount : 0
+    );
     const latency_ms = Date.now() - startTime;
     const cost_usd = this.calculateCost(input_tokens, output_tokens, reasoning_tokens);
 

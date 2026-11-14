@@ -401,4 +401,77 @@ describe('LLMClient Adapter Layer', () => {
       delete process.env.GEMINI_API_KEY;
     }
   });
+
+  it('reads Gemini usageMetadata.thoughtsTokenCount with fallback and includes reasoning tokens in total_tokens and cost_usd (P0-18)', async () => {
+    process.env.GEMINI_API_KEY = 'gem-test-123';
+    try {
+      const client = new LLMClient({
+        name: 'gemini_thoughts_cost',
+        type: 'gemini',
+        api_key_env: 'GEMINI_API_KEY',
+        default_model: 'gemini-2.5-flash',
+        cheap_model: 'gemini-2.5-flash-lite',
+        reasoning_model: 'gemini-2.5-pro',
+        supports_reasoning_effort: true,
+        supports_logprobs: false,
+        input_cost_per_million: 0.10,
+        output_cost_per_million: 0.40,
+        reasoning_cost_per_million: 0.40,
+      });
+
+      // 1. Primary path: usageMetadata.thoughtsTokenCount populated by Gemini SDK
+      const generateSpy = vi.fn().mockResolvedValueOnce({
+        text: 'final answer',
+        usageMetadata: {
+          promptTokenCount: 1000,
+          candidatesTokenCount: 250,
+          thoughtsTokenCount: 4000,
+          totalTokenCount: 5250,
+        },
+      });
+      (client as any).geminiClient = { models: { generateContent: generateSpy } };
+
+      const withThoughts = await client.complete('Solve hard problem', { reasoning_effort: 'high' });
+      expect(withThoughts.input_tokens).toBe(1000);
+      expect(withThoughts.output_tokens).toBe(250);
+      expect(withThoughts.reasoning_tokens).toBe(4000);
+      expect(withThoughts.total_tokens).toBe(5250);
+
+      // Expected cost = (1000*0.10 + 250*0.40 + 4000*0.40) / 1_000_000 = 0.001800
+      const expectedCostWithoutThoughts = client.calculateCost(1000, 250, 0);
+      const expectedCostWithThoughts = client.calculateCost(1000, 250, 4000);
+      expect(expectedCostWithThoughts).toBeGreaterThan(expectedCostWithoutThoughts);
+      expect(withThoughts.cost_usd).toBe(expectedCostWithThoughts);
+      expect(withThoughts.cost_usd).toBeCloseTo(0.0018, 6);
+
+      // 2. Fallback path: legacy reasoningTokenCount when thoughtsTokenCount is absent
+      generateSpy.mockResolvedValueOnce({
+        text: 'fallback answer',
+        usageMetadata: {
+          promptTokenCount: 500,
+          candidatesTokenCount: 100,
+          reasoningTokenCount: 300,
+        },
+      });
+      const withLegacyField = await client.complete('Fallback query', { reasoning_effort: 'medium' });
+      expect(withLegacyField.reasoning_tokens).toBe(300);
+      expect(withLegacyField.total_tokens).toBe(900);
+      expect(withLegacyField.cost_usd).toBe(client.calculateCost(500, 100, 300));
+
+      // 3. Graceful fallback: neither field present -> 0 reasoning_tokens
+      generateSpy.mockResolvedValueOnce({
+        text: 'plain answer',
+        usageMetadata: {
+          promptTokenCount: 200,
+          candidatesTokenCount: 50,
+        },
+      });
+      const withoutThoughts = await client.complete('Simple query', { reasoning_effort: 'none' });
+      expect(withoutThoughts.reasoning_tokens).toBe(0);
+      expect(withoutThoughts.total_tokens).toBe(250);
+      expect(withoutThoughts.cost_usd).toBe(client.calculateCost(200, 50, 0));
+    } finally {
+      delete process.env.GEMINI_API_KEY;
+    }
+  });
 });
