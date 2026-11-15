@@ -179,6 +179,11 @@ gemini-2.5-flash-lite (15 RPM free tier) with --limit 5 per category, keeping
 the $1.00 guard and 15m timeout; results must state the model and sample
 explicitly. Full 200-task runs stay available via parameters for paid keys.
 
+P0-22 (owner-approved, execute before anything else):
+a) evals/suites/spending_guard.ts: add gemini-3.5-flash-lite (and gemini-3.5-flash if GA) to PROVIDER_PRICING_CATALOG with estimated rates; bump PRICING_CATALOG_LAST_UPDATED.
+b) .github/workflows/live-eval.yml: change the default model input to gemini-3.5-flash-lite (the only GA lite model available to new API keys — gemini-2.5-flash-lite returns 404 for new users).
+c) Add a catalog test asserting every model referenced in live-eval.yml defaults exists in PROVIDER_PRICING_CATALOG.
+
 ## 8. ENVIRONMENT NOTES
 - Local container may lack build toolchains; if npm native builds fail,
   install build-essential via apt if available, otherwise use
