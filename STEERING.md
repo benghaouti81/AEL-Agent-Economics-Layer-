@@ -184,6 +184,27 @@ a) evals/suites/spending_guard.ts: add gemini-3.5-flash-lite (and gemini-3.5-fla
 b) .github/workflows/live-eval.yml: change the default model input to gemini-3.5-flash-lite (the only GA lite model available to new API keys — gemini-2.5-flash-lite returns 404 for new users).
 c) Add a catalog test asserting every model referenced in live-eval.yml defaults exists in PROVIDER_PRICING_CATALOG.
 
+P0-23 (per-call multi-model cost accounting): BudgetEngine may route calls to
+default_model / cheap_model / reasoning_model while cost_methodology uses one
+primary rate card. Record the exact model of every provider call, resolve
+pricing per actual model, aggregate separately for baseline / AEL / verifiers,
+never fall back to the primary model's rates for an uncatalogued model (reject
+with [AEL Pricing Error]), and emit a per-model cost breakdown in the evidence
+JSON. Tests: AEL run using three models with different prices must aggregate
+to the exact sum of per-call costs.
+P0-24 (pricing catalog verification): verify every Gemini catalog entry
+against Google's official pricing documentation; record pricing_source,
+effective date, and per-tier prices where applicable. Never invent prices for
+models whose official pricing cannot be verified — mark such entries
+'unverified' and do not label them official. Include gemini-3.5-flash-lite
+(added in P0-22) in this verification.
+P0-25 (strict sample-count integrity): benchmark_validator.ts must require
+total_queries/total_cases, reject valid_samples != expected evaluated count,
+reject inconsistent category counts, and reject partial/interrupted runs as
+complete benchmark evidence. Regression tests for missing, incomplete, and
+inconsistent sample counts.
+
+
 ## 8. ENVIRONMENT NOTES
 - Local container may lack build toolchains; if npm native builds fail,
   install build-essential via apt if available, otherwise use
