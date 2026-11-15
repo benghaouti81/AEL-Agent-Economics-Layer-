@@ -20,13 +20,13 @@ Both engines write to a unified, file-backed **SQLite Decision Log (`better-sqli
 
 | DoD Item | Requirement | Measured Evidence & Traceability | Acceptance Status |
 | :---: | :--- | :--- | :---: |
-| **#1** | $\ge 90\%$ tool-selection accuracy ($\le 3$ retries) on real model API | `evals/results/2026-11-13_tool_selection.json` (`provider_source: mock_simulator`)<br>Command: `AEL_ALLOW_MOCK=1 npx tsx bin/ael.ts eval --suite tool`<br>Offline smoke result: **90.0% accuracy (9/10)**, avg **0** retries across 10 selection cases (13 total cases = 10 selection + 3 dry-run catch) | **NOT VALIDATED**<br>*(Smoke run via `mock_simulator`; live model eval pending)* |
-| **#2** | $\ge 3$ dry-run safety catches of wrong tools | `evals/results/2026-11-13_tool_selection.json` (`provider_source: mock_simulator`)<br>Offline smoke result: **3/3 catches** (missing file, unauthorized SQL, empty query) | **NOT VALIDATED**<br>*(Smoke run via `mock_simulator`; live model eval pending)* |
-| **#3** | $\ge 50\%$ reasoning token reduction ($\le 2\text{pp}$ accuracy drop) on real model API | `evals/results/2026-11-14_budget_held_out.json` (`provider_source: mock_simulator`)<br>Command: `AEL_ALLOW_MOCK=1 npx tsx bin/ael.ts eval --suite budget --split held_out`<br>Offline smoke result: **54.8% token reduction (`70382/128522`)**, Base `0/200` $\to$ AEL `0/200` under real verifiers; no live API key in environment | **NOT VALIDATED**<br>*(Requires live API credentials)* |
-| **#4** | USD per completed task reduction on real model API | `evals/results/2026-11-14_budget_held_out.json` (`provider_source: mock_simulator`)<br>Offline smoke result: **$0.00037** $\to$ **$0.00015** per task (+$0.04487 net saved across 200 queries) | **NOT VALIDATED**<br>*(Requires live API credentials)* |
-| **#5** | Evaluation diversity across 4 mixed categories (50 queries each, held-out split) | `evals/suites/budget_eval_suite.ts` + `evals/results/2026-11-14_budget_held_out.json`<br>200 held-out queries (`50/50` factual, `50/50` math, `50/50` code, `50/50` extraction) | **NOT VALIDATED**<br>*(Dataset implemented; live execution pending API key)* |
+| **#1** | $\ge 90\%$ tool-selection accuracy ($\le 3$ retries) on real model API | `evals/results/2026-11-15_tool_selection.json` (`provider_source: mock_simulator`)<br>Command: `AEL_ALLOW_MOCK=1 npx tsx bin/ael.ts eval --suite tool`<br>Offline smoke result: **90.0% accuracy (9/10)**, avg **0** retries across 10 selection cases (13 total cases = 10 selection + 3 dry-run catch) | **NOT VALIDATED**<br>*(Smoke run via `mock_simulator`; live model eval pending)* |
+| **#2** | $\ge 3$ dry-run safety catches of wrong tools | `evals/results/2026-11-15_tool_selection.json` (`provider_source: mock_simulator`)<br>Offline smoke result: **3/3 catches** (missing file, unauthorized SQL, empty query) | **NOT VALIDATED**<br>*(Smoke run via `mock_simulator`; live model eval pending)* |
+| **#3** | $\ge 50\%$ reasoning token reduction ($\le 2\text{pp}$ accuracy drop) on real model API | `evals/results/2026-11-15_budget_held_out.json` (`provider_source: mock_simulator`)<br>Command: `AEL_ALLOW_MOCK=1 npx tsx bin/ael.ts eval --suite budget --split held_out`<br>Offline smoke result: **54.8% token reduction (`70382/128522`)**, Base `0/200` $\to$ AEL `0/200` under real verifiers; no live API key in environment | **NOT VALIDATED**<br>*(Requires live API credentials)* |
+| **#4** | USD per completed task reduction on real model API | `evals/results/2026-11-15_budget_held_out.json` (`provider_source: mock_simulator`)<br>Offline smoke result: **$0.00037** $\to$ **$0.00015** per task (+$0.04487 net saved across 200 queries; disclosed judge verification cost: $0.002892) | **NOT VALIDATED**<br>*(Requires live API credentials)* |
+| **#5** | Evaluation diversity across 4 mixed categories (50 queries each, held-out split) | `evals/suites/budget_eval_suite.ts` + `evals/results/2026-11-15_budget_held_out.json`<br>200 held-out queries (`50/50` factual, `50/50` math, `50/50` code, `50/50` extraction) | **NOT VALIDATED**<br>*(Dataset implemented; live execution pending API key)* |
 | **#6** | Negative-savings circuit breaker auto-trip to pass-through | `tests/circuit_breaker_e2e.test.ts`<br>Verified in CI: rolling net savings $\le 0$ trips breaker, subsequent requests run in pass-through mode, surfaces on CLI & dashboard | **PASS** |
-| **#7** | Middleware decision overhead p95 $< 500\text{ms}$ | `evals/results/2026-11-14_budget_held_out.json` (`overall_p95_overhead_ms`)<br>Measured p95 decision overhead (`performance.now()` excluding LLM I/O): **0 ms** | **PASS** |
+| **#7** | Middleware decision overhead p95 $< 500\text{ms}$ | `evals/results/2026-11-15_budget_held_out.json` (`overall_p95_overhead_ms`)<br>Measured p95 decision overhead (`performance.now()` excluding LLM I/O): **0 ms** | **PASS** |
 | **#8** | End-to-end runnable demonstration in `examples/` | `examples/agent_workflow_demo.ts`<br>Executed cleanly end-to-end via `AEL_ALLOW_MOCK=1 npx tsx examples/agent_workflow_demo.ts` | **PASS** |
 | **#9** | Code quality: $\ge 80\%$ test coverage on engines, clean `tsc --strict` | `vitest run --coverage`<br>34 tests passed across 10 files. Engines: **86.9% Stmts**, Config: **100% Stmts**, Gateway: **95% Stmts**, DB: **89.09% Stmts** | **PASS** |
 
@@ -35,23 +35,23 @@ Both engines write to a unified, file-backed **SQLite Decision Log (`better-sqli
 ## Measured Evaluation Benchmark Results
 
 ### 1. Tool Selection Engine (Tool-DC & Dry-Run Sandbox — Offline Smoke Run)
-- **Source**: `evals/results/2026-11-13_tool_selection.json`
+- **Source**: `evals/results/2026-11-15_tool_selection.json`
 - **Run Command**: `npx tsx bin/ael.ts eval --suite tool` *(with `AEL_ALLOW_MOCK=1`)*
-- **Execution Date**: 2026-11-13
+- **Execution Date**: 2026-11-15
 - **Provider Source**: `mock_simulator` (`NOT VALIDATED (No live upstream API credentials configured)`)
 
 | Metric | Target Acceptance Criteria | Measured Result | Status |
 | :--- | :---: | :---: | :---: |
-| **Tool Selection Accuracy** | $\ge 90.0\%$ (within $\le 3$ retries) | **90.0% (9/10)** *(source: `2026-11-13_tool_selection.json`)* | **NOT VALIDATED** *(Smoke threshold met)* |
-| **Dry-Run Catches of Faulty Tools** | $\ge 3$ demonstrated catches | **3/3 catches** *(source: `2026-11-13_tool_selection.json`)* | **NOT VALIDATED** *(Smoke threshold met)* |
-| **Average Reflection Retries** | $\le 1.5$ retries | **0 retries** *(0/10 selection cases; source: `2026-11-13_tool_selection.json`)* | **NOT VALIDATED** *(Smoke threshold met)* |
-| **Dry-Run Mode Enforcement** | Mutating tools blocked from execution | **100.0% enforced** *(1/1 mutating tool `fin_transfer_funds` blocked as `schema_only`; source: `2026-11-13_tool_selection.json`)* | **NOT VALIDATED** *(Smoke threshold met)* |
+| **Tool Selection Accuracy** | $\ge 90.0\%$ (within $\le 3$ retries) | **90.0% (9/10)** *(source: `2026-11-15_tool_selection.json`)* | **NOT VALIDATED** *(Smoke threshold met)* |
+| **Dry-Run Catches of Faulty Tools** | $\ge 3$ demonstrated catches | **3/3 catches** *(source: `2026-11-15_tool_selection.json`)* | **NOT VALIDATED** *(Smoke threshold met)* |
+| **Average Reflection Retries** | $\le 1.5$ retries | **0 retries** *(0/10 selection cases; source: `2026-11-15_tool_selection.json`)* | **NOT VALIDATED** *(Smoke threshold met)* |
+| **Dry-Run Mode Enforcement** | Mutating tools blocked from execution | **100.0% enforced** *(1/1 mutating tool `fin_transfer_funds` blocked as `schema_only`; source: `2026-11-15_tool_selection.json`)* | **NOT VALIDATED** *(Smoke threshold met)* |
 
 ### 2. Thinking Budget Engine (Separate Comparative Benchmark on 200 Held-Out Queries — Offline Smoke Run)
 - **Benchmark Type**: `comparative_benchmark_identical_samples` (AEL BudgetEngine vs. fixed `high`-effort baseline executed side-by-side on identical samples; savings claims come exclusively from this comparative benchmark, never from live per-request counterfactuals).
-- **Source**: `evals/results/2026-11-14_budget_held_out.json`
+- **Source**: `evals/results/2026-11-15_budget_held_out.json`
 - **Run Command**: `npx tsx bin/ael.ts eval --suite budget --split held_out` *(with `AEL_ALLOW_MOCK=1`)*
-- **Execution Date**: 2026-11-14
+- **Execution Date**: 2026-11-15
 - **Provider Source**: `mock_simulator` (`NOT VALIDATED (No live upstream API credentials configured)`)
 - **Dataset Composition & Real Verifiers**: 200 distinct, self-contained queries (50 per category) evaluated identically on baseline (`reasoning_effort: high`) and AEL outputs:
   - **Factual (50 distinct, `judge_verdict`)**: Multi-hop history, astrophysics, biochemistry, sovereign treaties, cryptography, linguistics verified via LLM judge verdict.
@@ -67,8 +67,9 @@ Both engines write to a unified, file-backed **SQLite Decision Log (`better-sqli
 | **Structured Extraction** | 50 unique | `json_field_match` | 32,694 | 6,694 | **79.5%** (`26000/32694`) | 0.0% (`0/50`) | 0.0% (`0/50`) | +$0.01560 |
 | **TOTAL (HELD-OUT)** | **200 distinct** | *Per-category* | **128,522** | **58,140** | **54.8%** (`70382/128522`) | **0.0%** (`0/200`) | **0.0%** (`0/200`) | **+$0.04487** |
 
-- **p95 Middleware Overhead**: **0 ms** (measured via `performance.now()` excluding LLM I/O; SLO Contract $< 500\text{ms}$: **PASS**; source: `2026-11-14_budget_held_out.json`).
-- **Cost / Completed Task (Offline Smoke)**: Baseline: **$0.00037** $\to$ AEL: **$0.00015** *(source: `2026-11-14_budget_held_out.json`)*.
+- **p95 Middleware Overhead**: **0 ms** (measured via `performance.now()` excluding LLM I/O; SLO Contract $< 500\text{ms}$: **PASS**; source: `2026-11-15_budget_held_out.json`).
+- **Cost / Completed Task (Offline Smoke)**: Baseline: **$0.00037** $\to$ AEL: **$0.00015** *(source: `2026-11-15_budget_held_out.json`)*.
+- **Disclosed Verification Cost (`verification_cost`)**: **$0.002892** *(LLM judge cost on `factual` items, reported strictly separately from product `baseline_cost_usd` / `actual_cost_usd` / `net_cost_saved_usd`; source: `2026-11-15_budget_held_out.json`)*.
 
 > [!IMPORTANT]
 > **Mock Eval Limitation Disclosure**: The figures above are from the offline synthetic smoke harness (`provider_source: mock_simulator`, `acceptance_status: NOT VALIDATED`) using 200 distinct handcrafted held-out prompts and 13 Tool-DC cases. Under `mock_simulator`, synthetic responses do not produce factual, numeric, JSON, or executable code solutions, so the real per-category verifiers honestly score `0/200` on both baseline and AEL (`0.0 pp` delta). Per project discipline, these serve as plumbing/control-flow smoke tests, not empirical model benchmark evidence. Live model benchmarking requires configuring `GEMINI_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY`.

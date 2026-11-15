@@ -12,6 +12,7 @@
  * @license Apache-2.0
  */
 
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -181,6 +182,7 @@ function checkEvalsAndReadme(): void {
     { label: 'budget overall baseline tokens', token: Number(budgetJson.overall_baseline_tokens).toLocaleString('en-US') },
     { label: 'budget overall actual tokens', token: Number(budgetJson.overall_actual_tokens).toLocaleString('en-US') },
     { label: 'budget overall net savings', token: `+$${Number(budgetJson.overall_net_savings_usd).toFixed(5)}` },
+    { label: 'budget disclosed verification_cost', token: `$${Number(budgetJson.verification_cost).toFixed(6)}` },
     { label: 'budget usd_per_task_baseline', token: `$${Number(budgetJson.usd_per_task_baseline).toFixed(5)}` },
     { label: 'budget usd_per_task_ael', token: `$${Number(budgetJson.usd_per_task_ael).toFixed(5)}` },
     { label: 'budget overall p95 overhead', token: `**${budgetJson.overall_p95_overhead_ms} ms**` },
@@ -268,10 +270,86 @@ function checkEnginesCoverage(): void {
   pass('coverage-gate', `src/engines statement coverage = ${pct.toFixed(2)}% (${coveredStatements}/${totalStatements} >= 80.0%).`);
 }
 
+// ============================================================================
+// (f) Staleness gate: fail if any evals/results file is older than latest src/ or evals/ commit
+// ============================================================================
+function checkResultsFreshness(): void {
+  const resultsDir = path.join(ROOT_DIR, 'evals', 'results');
+  if (!fs.existsSync(resultsDir)) {
+    fail('results-staleness', 'evals/results directory not found.');
+  }
+
+  let latestCodeCommitRaw = '';
+  try {
+    latestCodeCommitRaw = execFileSync(
+      'git',
+      ['log', '-1', '--format=%ct %h', '--', 'src/', 'evals/', ':(exclude)evals/results/'],
+      { cwd: ROOT_DIR, encoding: 'utf8' }
+    ).trim();
+  } catch (err: any) {
+    fail('results-staleness', `Unable to query git history for src/ and evals/: ${err?.message || String(err)}`);
+  }
+
+  if (!latestCodeCommitRaw) {
+    fail('results-staleness', 'No git commits found touching src/ or evals/.');
+  }
+
+  const [latestCodeTsStr, latestCodeSha] = latestCodeCommitRaw.split(/\s+/);
+  const latestCodeTs = Number(latestCodeTsStr);
+  if (!Number.isFinite(latestCodeTs) || latestCodeTs <= 0) {
+    fail('results-staleness', `Invalid git commit timestamp '${latestCodeCommitRaw}'.`);
+  }
+
+  const allResultFiles = fs.readdirSync(resultsDir).filter(f => f.endsWith('.json'));
+  if (allResultFiles.length === 0) {
+    fail('results-staleness', 'No JSON files found in evals/results/.');
+  }
+
+  for (const file of allResultFiles) {
+    const full = path.join(resultsDir, file);
+    const rel = `evals/results/${file}`;
+    const fileCommitRaw = execFileSync(
+      'git',
+      ['log', '-1', '--format=%ct %h', '--', rel],
+      { cwd: ROOT_DIR, encoding: 'utf8' }
+    ).trim();
+
+    if (fileCommitRaw) {
+      const [fileTsStr, fileSha] = fileCommitRaw.split(/\s+/);
+      const fileTs = Number(fileTsStr);
+      if (fileTs < latestCodeTs) {
+        fail(
+          'results-staleness',
+          `${rel} (commit ${fileSha}, ts=${fileTs}) is older than latest src/evals code commit (${latestCodeSha}, ts=${latestCodeTs}). Regenerate ALL eval results.`
+        );
+      }
+    } else {
+      // Untracked result file generated during the current run: check embedded ISO timestamp or mtime
+      const data = JSON.parse(fs.readFileSync(full, 'utf8'));
+      const parsedMs = data?.timestamp ? Date.parse(String(data.timestamp)) : NaN;
+      const fileTs = Number.isFinite(parsedMs)
+        ? Math.floor(parsedMs / 1000)
+        : Math.floor(fs.statSync(full).mtimeMs / 1000);
+      if (fileTs < latestCodeTs) {
+        fail(
+          'results-staleness',
+          `Untracked ${rel} (ts=${fileTs}) is older than latest src/evals code commit (${latestCodeSha}, ts=${latestCodeTs}).`
+        );
+      }
+    }
+  }
+
+  pass(
+    'results-staleness',
+    `All ${allResultFiles.length} evals/results file(s) are fresh relative to latest src/evals commit (${latestCodeSha}).`
+  );
+}
+
 function main(): void {
   console.log('=== AEL verify-dod CI Gate ===');
   checkMagicNumbers();
   checkEvalsAndReadme();
+  checkResultsFreshness();
   checkEnginesCoverage();
   console.log('=== All verify-dod gates PASSED ===');
 }

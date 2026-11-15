@@ -3,7 +3,7 @@
  * @license Apache-2.0
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -91,5 +91,50 @@ describe('Live Evaluation Credentials & Spending Guard', () => {
     ).rejects.toThrow(/Spending Guard ABORT/);
 
     store.close();
+  });
+
+  it('reports verifier/judge costs separately from product costs as disclosed verification_cost (P0-20)', async () => {
+    const origAllowMock = process.env.AEL_ALLOW_MOCK;
+    process.env.AEL_ALLOW_MOCK = '1';
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+
+    const dbPath = path.join(os.tmpdir(), `ael_verif_cost_${Date.now()}.db`);
+    tmpDbs.push(dbPath);
+    const store = new DecisionLogStore(dbPath);
+
+    const origWriteFileSync = fs.writeFileSync.bind(fs);
+    const writeSpy = vi.spyOn(fs, 'writeFileSync').mockImplementation((file, data, options) => {
+      if (String(file).includes('_budget_tuning.json')) return;
+      return origWriteFileSync(file, data as string | NodeJS.ArrayBufferView, options);
+    });
+
+    try {
+      const result = await runBudgetEvalSuite(store, 'tuning');
+      expect(typeof result.verification_cost).toBe('number');
+      expect(result.verification_cost).toBeGreaterThan(0);
+
+      const factualMetric = result.categories.factual;
+      const mathMetric = result.categories.math;
+      expect(factualMetric.verification_cost).toBeGreaterThan(0);
+      expect(mathMetric.verification_cost).toBe(0);
+
+      // Sum of category verification_cost equals disclosed top-level verification_cost
+      const catVerifSum = Object.values(result.categories).reduce((s, c) => s + c.verification_cost, 0);
+      expect(result.verification_cost).toBeCloseTo(catVerifSum, 5);
+
+      // Net product savings excludes verification_cost
+      const catProductNetSum = Object.values(result.categories).reduce(
+        (s, c) => s + (c.baseline_cost_usd - c.actual_cost_usd),
+        0
+      );
+      expect(result.overall_net_savings_usd).toBeCloseTo(catProductNetSum, 4);
+    } finally {
+      writeSpy.mockRestore();
+      if (origAllowMock === undefined) delete process.env.AEL_ALLOW_MOCK;
+      else process.env.AEL_ALLOW_MOCK = origAllowMock;
+      store.close();
+    }
   });
 });

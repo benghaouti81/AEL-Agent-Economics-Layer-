@@ -138,6 +138,7 @@ program
       console.log(`Accuracy Delta:           ${budgetRes.accuracy_drop_pp} pp (Base ${budgetRes.overall_baseline_accuracy_ratio} -> AEL ${budgetRes.overall_accuracy_ratio})`);
       console.log(`p95 Decision Overhead:    ${budgetRes.overall_p95_overhead_ms} ms (Criteria < 500ms: ${budgetRes.overall_p95_overhead_ms < 500 ? 'PASS' : 'FAIL'})`);
       console.log(`Net Cost Saved (USD):     $${budgetRes.overall_net_savings_usd.toFixed(4)}`);
+      console.log(`Verification Cost (Judge):$${budgetRes.verification_cost.toFixed(6)} (disclosed separately from product costs)`);
       
       console.log('\n--- Breakdown per Category (50 queries each) ---');
       for (const [cat, metric] of Object.entries(budgetRes.categories)) {

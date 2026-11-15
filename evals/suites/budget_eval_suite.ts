@@ -53,6 +53,8 @@ export interface CategoryMetric {
   baseline_cost_usd: number;
   actual_cost_usd: number;
   net_cost_saved_usd: number;
+  /** Disclosed verifier/judge cost (USD), tracked strictly separately from baseline/actual product costs */
+  verification_cost: number;
   baseline_correct: number;
   baseline_accuracy_ratio: string;
   baseline_accuracy: number;
@@ -83,6 +85,8 @@ export interface BudgetEvalResult {
   overall_token_reduction_ratio: string;
   overall_token_reduction_pct: number;
   overall_net_savings_usd: number;
+  /** Disclosed total verifier/judge cost (USD), excluded from baseline/actual/net product savings */
+  verification_cost: number;
   usd_per_task_baseline: number;
   usd_per_task_ael: number;
   overall_baseline_correct: number;
@@ -908,12 +912,22 @@ export async function runBudgetEvalSuite(
 
   const catStats: Record<
     string,
-    { baselineTok: number; actualTok: number; baseCost: number; actCost: number; baseCorrect: number; correct: number; total: number; overheads: number[] }
+    {
+      baselineTok: number;
+      actualTok: number;
+      baseCost: number;
+      actCost: number;
+      verificationCost: number;
+      baseCorrect: number;
+      correct: number;
+      total: number;
+      overheads: number[];
+    }
   > = {
-    factual: { baselineTok: 0, actualTok: 0, baseCost: 0, actCost: 0, baseCorrect: 0, correct: 0, total: 0, overheads: [] },
-    math: { baselineTok: 0, actualTok: 0, baseCost: 0, actCost: 0, baseCorrect: 0, correct: 0, total: 0, overheads: [] },
-    code: { baselineTok: 0, actualTok: 0, baseCost: 0, actCost: 0, baseCorrect: 0, correct: 0, total: 0, overheads: [] },
-    extraction: { baselineTok: 0, actualTok: 0, baseCost: 0, actCost: 0, baseCorrect: 0, correct: 0, total: 0, overheads: [] },
+    factual: { baselineTok: 0, actualTok: 0, baseCost: 0, actCost: 0, verificationCost: 0, baseCorrect: 0, correct: 0, total: 0, overheads: [] },
+    math: { baselineTok: 0, actualTok: 0, baseCost: 0, actCost: 0, verificationCost: 0, baseCorrect: 0, correct: 0, total: 0, overheads: [] },
+    code: { baselineTok: 0, actualTok: 0, baseCost: 0, actCost: 0, verificationCost: 0, baseCorrect: 0, correct: 0, total: 0, overheads: [] },
+    extraction: { baselineTok: 0, actualTok: 0, baseCost: 0, actCost: 0, verificationCost: 0, baseCorrect: 0, correct: 0, total: 0, overheads: [] },
   };
 
   let cumulativeCostUsd = 0;
@@ -940,7 +954,8 @@ export async function runBudgetEvalSuite(
     // 3. Apply identical real per-category verifier to both baseline and AEL responses
     const baseCheck = await verifyCaseOutput(tc, baselineRes.text, llm);
     const aelCheck = await verifyCaseOutput(tc, res.text, llm);
-    cumulativeCostUsd += baseCheck.extraCostUsd + aelCheck.extraCostUsd;
+    const verificationCostUsd = baseCheck.extraCostUsd + aelCheck.extraCostUsd;
+    cumulativeCostUsd += verificationCostUsd;
 
     if (liveMode || options.maxCostUsd !== undefined) {
       assertWithinSpendingGuard(cumulativeCostUsd, maxCostUsd, `budget_eval_suite(${split}):runtime`);
@@ -951,8 +966,10 @@ export async function runBudgetEvalSuite(
       stat.total++;
       stat.baselineTok += res.baseline_tokens;
       stat.actualTok += res.total_tokens;
+      // Product costs only (verifier/judge costs are tracked separately in verificationCost)
       stat.baseCost += res.baseline_cost_usd;
       stat.actCost += res.total_cost_usd;
+      stat.verificationCost += verificationCostUsd;
       stat.overheads.push(res.ael_overhead_ms);
       if (baseCheck.passed) stat.baseCorrect++;
       if (aelCheck.passed) stat.correct++;
@@ -964,6 +981,7 @@ export async function runBudgetEvalSuite(
   let totalActTok = 0;
   let totalBaseCost = 0;
   let totalActCost = 0;
+  let totalVerificationCost = 0;
   let totalBaseCorrect = 0;
   let totalCorrect = 0;
   let allOverheads: number[] = [];
@@ -990,6 +1008,7 @@ export async function runBudgetEvalSuite(
       baseline_cost_usd: Number(stat.baseCost.toFixed(5)),
       actual_cost_usd: Number(stat.actCost.toFixed(5)),
       net_cost_saved_usd: netSavedUsd,
+      verification_cost: Number(stat.verificationCost.toFixed(6)),
       baseline_correct: stat.baseCorrect,
       baseline_accuracy_ratio: `${stat.baseCorrect}/${stat.total}`,
       baseline_accuracy: baselineAcc,
@@ -1004,6 +1023,7 @@ export async function runBudgetEvalSuite(
     totalActTok += stat.actualTok;
     totalBaseCost += stat.baseCost;
     totalActCost += stat.actCost;
+    totalVerificationCost += stat.verificationCost;
     totalBaseCorrect += stat.baseCorrect;
     totalCorrect += stat.correct;
     allOverheads = allOverheads.concat(stat.overheads);
@@ -1013,6 +1033,7 @@ export async function runBudgetEvalSuite(
   const overallP95 = allOverheads[Math.floor(allOverheads.length * 0.95)] ?? 0;
   const overallTokenReduct = ((totalBaseTok - totalActTok) / totalBaseTok) * 100;
   const overallNetSavings = Number((totalBaseCost - totalActCost).toFixed(5));
+  const overallVerificationCost = Number(totalVerificationCost.toFixed(6));
   const usdPerTaskBaseline = Number((totalBaseCost / testCases.length).toFixed(5));
   const usdPerTaskAel = Number((totalActCost / testCases.length).toFixed(5));
   const overallAcc = Number((totalCorrect / testCases.length).toFixed(4));
@@ -1046,6 +1067,7 @@ export async function runBudgetEvalSuite(
     overall_token_reduction_ratio: `${totalBaseTok - totalActTok}/${totalBaseTok}`,
     overall_token_reduction_pct: Number(overallTokenReduct.toFixed(1)),
     overall_net_savings_usd: overallNetSavings,
+    verification_cost: overallVerificationCost,
     usd_per_task_baseline: usdPerTaskBaseline,
     usd_per_task_ael: usdPerTaskAel,
     overall_baseline_correct: totalBaseCorrect,

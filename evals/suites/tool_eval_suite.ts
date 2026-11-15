@@ -33,6 +33,7 @@ export interface ToolEvalOptions {
 
 export interface ToolEvalResult {
   suite_name: string;
+  timestamp: string;
   execution_date: string;
   run_command: string;
   live_api_credentials_present: boolean;
@@ -307,6 +308,7 @@ export async function runToolEvalSuite(
 
   const evalResult: ToolEvalResult = {
     suite_name: 'Tool-DC Verification & Safety Suite',
+    timestamp: now.toISOString(),
     execution_date: dateStr,
     run_command: liveMode ? 'npx tsx bin/ael.ts eval --suite tool --live' : 'npx tsx bin/ael.ts eval --suite tool',
     live_api_credentials_present: hasLiveApiKey,

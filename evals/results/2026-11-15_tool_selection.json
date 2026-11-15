@@ -1,6 +1,7 @@
 {
   "suite_name": "Tool-DC Verification & Safety Suite",
-  "execution_date": "2026-11-13",
+  "timestamp": "2026-11-15T12:19:15.365Z",
+  "execution_date": "2026-11-15",
   "run_command": "npx tsx bin/ael.ts eval --suite tool",
   "live_api_credentials_present": false,
   "provider_source": "mock_simulator",
