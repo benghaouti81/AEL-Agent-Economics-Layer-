@@ -73,6 +73,44 @@ describe('Budget Eval Per-Category Real Verifiers (P0-9)', () => {
     expect(verifyCodeAssertionExecution('Processed response for query. Verified output.', 'reverseInPlace', assertion).passed).toBe(false);
   });
 
+  it('executes model-generated code in a separate child process with sanitized env (no secrets inherited) and enforces timeouts (P0-19)', () => {
+    const prevGemini = process.env.GEMINI_API_KEY;
+    const prevSecret = process.env.TEST_SECRET_TOKEN;
+    process.env.GEMINI_API_KEY = 'parent-gemini-secret-xyz';
+    process.env.TEST_SECRET_TOKEN = 'parent-secret-token-abc';
+
+    try {
+      // Even if generated code escapes node:vm via injected assert host-realm function,
+      // it lands in a separate child process with an empty sanitized env ({}).
+      const probeEnvCode = `
+        function inspectEnv() {
+          const proc = assert.strictEqual.constructor('return process')();
+          return { pid: proc.pid, envKeys: Object.keys(proc.env), gemini: proc.env.GEMINI_API_KEY ?? null, secret: proc.env.TEST_SECRET_TOKEN ?? null };
+        }
+      `;
+      const assertNoSecrets = `
+        const info = inspectEnv();
+        assert.notStrictEqual(info.pid, ${process.pid});
+        assert.deepStrictEqual(info.envKeys, []);
+        assert.strictEqual(info.gemini, null);
+        assert.strictEqual(info.secret, null);
+      `;
+      const envRes = verifyCodeAssertionExecution(probeEnvCode, 'inspectEnv', assertNoSecrets);
+      expect(envRes.passed, envRes.detail).toBe(true);
+
+      // Infinite loop must be killed by timeout and fail cleanly
+      const loopCode = 'function spin() { while (true) {} }';
+      const timeoutRes = verifyCodeAssertionExecution(loopCode, 'spin', 'spin();', { timeoutMs: 300, vmTimeoutMs: 100 });
+      expect(timeoutRes.passed).toBe(false);
+      expect(timeoutRes.detail.toLowerCase()).toMatch(/timed out|timeout|script execution/);
+    } finally {
+      if (prevGemini === undefined) delete process.env.GEMINI_API_KEY;
+      else process.env.GEMINI_API_KEY = prevGemini;
+      if (prevSecret === undefined) delete process.env.TEST_SECRET_TOKEN;
+      else process.env.TEST_SECRET_TOKEN = prevSecret;
+    }
+  });
+
   it('verifies extraction responses via JSON parsing and field matching', () => {
     const validJson = '```json\n{"name": "Jane Doe", "email": "jane.doe@acme.io", "phone": "+1-555-0192"}\n```';
     const expected = { name: 'Jane Doe', email: 'jane.doe@acme.io', phone: '+1-555-0192' };
@@ -219,6 +257,6 @@ describe('Budget Eval Dataset Integrity (P0-9)', () => {
       const res = verifyCodeAssertionExecution(impl, q.function_name!, q.assertion_script!);
       expect(res.passed, `${q.id} failed: ${res.detail}`).toBe(true);
     }
-  });
+  }, 20_000);
 });
 

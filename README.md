@@ -56,7 +56,7 @@ Both engines write to a unified, file-backed **SQLite Decision Log (`better-sqli
 - **Dataset Composition & Real Verifiers**: 200 distinct, self-contained queries (50 per category) evaluated identically on baseline (`reasoning_effort: high`) and AEL outputs:
   - **Factual (50 distinct, `judge_verdict`)**: Multi-hop history, astrophysics, biochemistry, sovereign treaties, cryptography, linguistics verified via LLM judge verdict.
   - **Math (50 distinct, `numeric_match`)**: Modular arithmetic, differential equations, Markov chains, probability, linear algebra, number theory verified via numeric ground-truth match.
-  - **Code (50 distinct, `code_execution`)**: Lock-free ring buffers, topological sort, LRU caches, AST/string algorithms verified via `esbuild` compilation and `node:vm` functional assertion checks *(functional check only — NOT a security sandbox; not hardened for untrusted code execution)*.
+  - **Code (50 distinct, `code_execution`)**: Lock-free ring buffers, topological sort, LRU caches, AST/string algorithms verified via `esbuild` compilation and a separate `node` child process with a sanitized environment (`env: {}`) and bounded timeout *(functional check only — NOT an OS/container security sandbox)*.
   - **Extraction (50 distinct, `json_field_match`)**: Self-contained invoices, clinical vitals, audit logs, X.509/SWIFT payloads verified via JSON field equality.
 
 | Task Category | Evaluated Queries | Verifier | Baseline Tokens | AEL Actual Tokens | Token Reduction | Baseline Accuracy | AEL Accuracy | Net USD Saved |
@@ -127,9 +127,9 @@ Per workflow, AEL maintains a rolling window of 20 requests. If rolling net savi
 - **Live Per-Request Accounting (`actual_only`)**: Live proxy endpoints (`POST /v1/chat/completions`, `POST /v1/messages`) and `BudgetEngine.routeAndExecute()` (without a comparative benchmark baseline) report **actual consumption only** (`actual_tokens`, `upstream_tokens`, `ael_internal_tokens`, `actual_cost_usd`, `ael_overhead_ms`). AEL never executes hidden counterfactual calls or claims per-request savings on live traffic.
 - **Comparative Benchmark Savings (`comparative_benchmark_identical_samples`)**: All token and USD savings claims come exclusively from the separate comparative benchmark (`eval --suite budget`), which evaluates fixed `high`-effort baseline and AEL side-by-side on identical samples.
 
-### 5. Code Verifier Scope (`node:vm` Functional Check Only — Not a Security Sandbox)
-- The `code_execution` benchmark verifier (`evals/suites/budget_verifiers.ts`) uses `esbuild` + Node's `node:vm` strictly as a **functional correctness check** to run deterministic evaluation assertions without polluting the test runner's global scope.
-- `node:vm` is **NOT a security sandbox** and provides no security isolation boundary. AEL makes **zero claims** of safe untrusted-code execution in `node:vm`; untrusted or adversarial code must not be executed without OS/container/microVM isolation outside this benchmark harness.
+### 5. Code Verifier Scope (Child Process + Sanitized Env — Not a Security Sandbox)
+- The `code_execution` benchmark verifier (`evals/suites/budget_verifiers.ts`) compiles snippets with `esbuild` and executes assertions inside a **separate Node.js child process** with an empty/sanitized environment (`env: {}` — zero inherited API keys or secrets), a clean `node:vm` context, and hard timeouts (inner VM CPU timeout + outer `SIGKILL` timeout).
+- **Honest Isolation Boundary**: Child-process execution + `env: {}` isolates parent memory and environment secrets/API keys, **but runs under the same OS user/UID with shared host filesystem/kernel permissions**. It is **NOT** a container, seccomp jail, or microVM security sandbox; adversarial untrusted code must still be isolated in an OS container or microVM outside this benchmark harness.
 
 ---
 

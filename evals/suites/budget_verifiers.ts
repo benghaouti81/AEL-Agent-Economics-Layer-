@@ -1,14 +1,13 @@
 /**
  * AEL — Real Per-Category Verification for Thinking Budget Evaluation Suite (P0-9)
  * - math: numeric match (exact / tolerance)
- * - code: TypeScript/JavaScript compilation via esbuild + functional node:vm assertion check (NOT a security sandbox; no untrusted-code execution claims)
+ * - code: TypeScript/JavaScript compilation via esbuild + separate Node child process with sanitized env ({}) & timeout (functional check only, NOT a container/kernel security sandbox)
  * - extraction: JSON parsing & expected field matching
  * - reasoning/factual: LLM judge verdict against reference answer (never accepts empty/boilerplate)
  * @license Apache-2.0
  */
 
-import vm from 'node:vm';
-import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import * as esbuild from 'esbuild';
 import { LLMClient } from '../../src/llm/client.js';
 
@@ -93,17 +92,41 @@ export function verifyMathNumericMatch(
   };
 }
 
+const DEFAULT_CODE_TIMEOUT_MS = 1500;
+const DEFAULT_VM_TIMEOUT_MS = 250;
+
+const CHILD_VERIFIER_RUNNER = [
+  "const fs = require('node:fs');",
+  "const vm = require('node:vm');",
+  "const assert = require('node:assert/strict');",
+  "const payload = JSON.parse(fs.readFileSync(0, 'utf8'));",
+  'const context = vm.createContext({ assert });',
+  'vm.runInContext(payload.jsCode, context, { timeout: payload.vmTimeoutMs });',
+  "const fnExists = vm.runInContext('typeof globalThis[' + JSON.stringify(payload.functionName) + \"] === 'function'\", context, { timeout: 50 });",
+  'if (!fnExists) {',
+  "  process.stderr.write(\"Function '\" + payload.functionName + \"' not defined after execution\");",
+  '  process.exit(2);',
+  '}',
+  'vm.runInContext(payload.assertionScript, context, { timeout: payload.vmTimeoutMs });',
+].join('\n');
+
 /**
  * Compiles TypeScript/JavaScript from response text using esbuild and runs functional assertions
- * in a `node:vm` context.
+ * in a separate Node.js child process with a sanitized environment (`env: {}`) and hard timeouts.
  *
- * SECURITY NOTICE: `node:vm` is used strictly as a functional correctness check for benchmark
- * assertions. It is NOT a security sandbox and does NOT safely isolate untrusted code execution.
+ * ISOLATION BOUNDARY (HONEST SCOPE):
+ * - Isolated: Separate OS process address space & V8 isolate, empty environment (`env: {}`, zero
+ *   parent API keys/tokens/secrets inherited), clean `node:vm` context globals, and bounded
+ *   execution timeouts (inner `vm` CPU timeout + outer child process `SIGKILL` timeout).
+ * - NOT isolated: Runs under the same OS user/UID and shares host filesystem/network/kernel
+ *   capabilities. It is NOT a container, seccomp/AppArmor jail, or microVM security sandbox;
+ *   adversarial untrusted code still requires container/VM-level isolation outside this harness.
  */
 export function verifyCodeAssertionExecution(
   responseText: string,
   functionName: string,
-  assertionScript: string
+  assertionScript: string,
+  options: { timeoutMs?: number; vmTimeoutMs?: number } = {}
 ): VerificationResult {
   if (!responseText || !responseText.trim()) {
     return { passed: false, method: 'code_execution', detail: 'Empty response' };
@@ -113,7 +136,7 @@ export function verifyCodeAssertionExecution(
   const fenceMatch = responseText.match(/```(?:typescript|ts|javascript|js)?\s*\n([\s\S]*?)```/i);
   let rawCode = fenceMatch ? fenceMatch[1] : responseText;
 
-  // Strip ESM export keywords so function declarations bind cleanly into the vm context global
+  // Strip ESM export keywords so function declarations bind cleanly into the child vm context global
   rawCode = rawCode
     .replace(/^\s*import\s+[\s\S]*?;\s*$/gm, '')
     .replace(/\bexport\s+default\s+/g, '')
@@ -134,38 +157,51 @@ export function verifyCodeAssertionExecution(
     };
   }
 
-  try {
-    // Functional check only (NOT a security sandbox / NOT for untrusted code execution).
-    // Only inject Node's assert; keep VM-native intrinsics (Array, Map, Set, Date, Object)
-    // so `new Array(...)` / `new Map()` share prototypes with literal expressions in assertions.
-    const vmContextGlobals: Record<string, any> = {
-      assert,
-    };
-    const context = vm.createContext(vmContextGlobals);
-    vm.runInContext(jsCode, context, { timeout: 200 });
+  const timeoutMs = options.timeoutMs ?? DEFAULT_CODE_TIMEOUT_MS;
+  const vmTimeoutMs = options.vmTimeoutMs ?? Math.min(DEFAULT_VM_TIMEOUT_MS, timeoutMs);
 
-    const fnCheck = vm.runInContext(`typeof ${functionName} === 'function'`, context, { timeout: 50 });
-    if (!fnCheck) {
-      return {
-        passed: false,
-        method: 'code_execution',
-        detail: `Function '${functionName}' not defined after execution`,
-      };
+  // Spawn child process with sanitized env ({}) so parent API keys & secrets are never inherited.
+  const child = spawnSync(
+    process.execPath,
+    ['--input-type=commonjs', '-e', CHILD_VERIFIER_RUNNER],
+    {
+      input: JSON.stringify({ jsCode, functionName, assertionScript, vmTimeoutMs }),
+      env: {},
+      timeout: timeoutMs,
+      maxBuffer: 1024 * 1024,
+      encoding: 'utf8',
+      killSignal: 'SIGKILL',
     }
+  );
 
-    vm.runInContext(assertionScript, context, { timeout: 200 });
-    return {
-      passed: true,
-      method: 'code_execution',
-      detail: `All assertions passed for ${functionName}`,
-    };
-  } catch (err: any) {
+  if (child.error) {
+    const errCode = (child.error as any).code;
     return {
       passed: false,
       method: 'code_execution',
-      detail: `Runtime/assertion error for ${functionName}: ${err?.message || String(err)}`,
+      detail:
+        errCode === 'ETIMEDOUT'
+          ? `Execution timed out after ${timeoutMs}ms for ${functionName}`
+          : `Child process error for ${functionName}: ${child.error.message}`,
     };
   }
+
+  if (child.status !== 0) {
+    const stderrMsg = (child.stderr || '').trim();
+    return {
+      passed: false,
+      method: 'code_execution',
+      detail: stderrMsg
+        ? `Runtime/assertion error for ${functionName}: ${stderrMsg}`
+        : `Child process exited with status ${child.status} (signal=${child.signal || 'none'}) for ${functionName}`,
+    };
+  }
+
+  return {
+    passed: true,
+    method: 'code_execution',
+    detail: `All assertions passed for ${functionName}`,
+  };
 }
 
 /**
