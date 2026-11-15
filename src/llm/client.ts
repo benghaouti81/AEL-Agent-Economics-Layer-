@@ -282,7 +282,7 @@ export class LLMClient {
     }
 
     const input_tokens = assertNonNegativeFiniteTokenCount(usage.prompt_tokens, 'usage.prompt_tokens', 'OpenAI');
-    const output_tokens = assertNonNegativeFiniteTokenCount(usage.completion_tokens, 'usage.completion_tokens', 'OpenAI');
+    const rawOutputTokens = assertNonNegativeFiniteTokenCount(usage.completion_tokens, 'usage.completion_tokens', 'OpenAI');
 
     let reasoning_tokens = 0;
     const rawReasoning = usage.completion_tokens_details?.reasoning_tokens;
@@ -292,14 +292,25 @@ export class LLMClient {
         'usage.completion_tokens_details.reasoning_tokens',
         'OpenAI'
       );
-    } else if (typeof usage.total_tokens === 'number' && Number.isFinite(usage.total_tokens) && usage.total_tokens > input_tokens + output_tokens) {
-      reasoning_tokens = usage.total_tokens - (input_tokens + output_tokens);
+    } else if (typeof usage.total_tokens === 'number' && Number.isFinite(usage.total_tokens) && usage.total_tokens > input_tokens + rawOutputTokens) {
+      reasoning_tokens = usage.total_tokens - (input_tokens + rawOutputTokens);
     }
 
+    // OpenAI reports reasoning_tokens inside completion_tokens (total_tokens === prompt_tokens + completion_tokens).
+    // Split visible output vs reasoning only when total_tokens confirms inclusive reporting so we never double-count.
+    const includedInOutput =
+      reasoning_tokens > 0 &&
+      typeof usage.total_tokens === 'number' &&
+      Number.isFinite(usage.total_tokens) &&
+      usage.total_tokens === input_tokens + rawOutputTokens &&
+      rawOutputTokens >= reasoning_tokens;
+    const output_tokens = includedInOutput ? rawOutputTokens - reasoning_tokens : rawOutputTokens;
+
+    const summedTotal = input_tokens + output_tokens + reasoning_tokens;
     const total_tokens =
       typeof usage.total_tokens === 'number' && Number.isFinite(usage.total_tokens)
-        ? Math.max(usage.total_tokens, input_tokens + output_tokens + reasoning_tokens)
-        : input_tokens + output_tokens + reasoning_tokens;
+        ? Math.max(usage.total_tokens, summedTotal)
+        : summedTotal;
 
     const latency_ms = Date.now() - startTime;
     const cost_usd = this.calculateCost(input_tokens, output_tokens, reasoning_tokens);
@@ -423,13 +434,17 @@ export class LLMClient {
     model: string,
     effort: 'none' | 'low' | 'medium' | 'high'
   ): ThinkingConfig {
+    const normalizedModel = model.replace(/^models\//i, '');
+    const isGemini4 = /^gemini-4/i.test(normalizedModel);
+    const isGemini3Or4 = /^gemini-[34]/i.test(normalizedModel);
     const useLevel =
       this.profile.gemini_thinking_mode === 'level' ||
-      (this.profile.gemini_thinking_mode === undefined && /^gemini-3/i.test(model));
+      (this.profile.gemini_thinking_mode === undefined && isGemini3Or4);
 
     if (useLevel) {
+      // Gemini 4 (hydrogen/argon/carbon) rejects ThinkingLevel.MINIMAL with HTTP 400; lowest supported level is LOW.
       const levelMap: Record<'none' | 'low' | 'medium' | 'high', ThinkingLevel> = {
-        none: ThinkingLevel.MINIMAL,
+        none: isGemini4 ? ThinkingLevel.LOW : ThinkingLevel.MINIMAL,
         low: ThinkingLevel.LOW,
         medium: ThinkingLevel.MEDIUM,
         high: ThinkingLevel.HIGH,
@@ -439,7 +454,7 @@ export class LLMClient {
 
     const customBudgets = this.profile.gemini_thinking_budgets;
     const defaultBudgets: Record<'none' | 'low' | 'medium' | 'high', number> = {
-      none: /2\.5-pro/i.test(model) ? 128 : 0,
+      none: /2\.5-pro/i.test(normalizedModel) ? 128 : 0,
       low: 512,
       medium: 2048,
       high: 8192,
@@ -528,7 +543,7 @@ export class LLMClient {
       'usageMetadata.promptTokenCount',
       'Gemini'
     );
-    const output_tokens = assertNonNegativeFiniteTokenCount(
+    const rawOutputTokens = assertNonNegativeFiniteTokenCount(
       usage.candidatesTokenCount,
       'usageMetadata.candidatesTokenCount',
       'Gemini'
@@ -550,13 +565,27 @@ export class LLMClient {
     } else if (
       typeof usage.totalTokenCount === 'number' &&
       Number.isFinite(usage.totalTokenCount) &&
-      usage.totalTokenCount > input_tokens + output_tokens
+      usage.totalTokenCount > input_tokens + rawOutputTokens
     ) {
-      reasoning_tokens = usage.totalTokenCount - (input_tokens + output_tokens);
+      reasoning_tokens = usage.totalTokenCount - (input_tokens + rawOutputTokens);
     }
 
+    // Standard @google/genai reports candidatesTokenCount and thoughtsTokenCount disjointly
+    // (totalTokenCount === promptTokenCount + candidatesTokenCount + thoughtsTokenCount).
+    // If a response reports totalTokenCount === promptTokenCount + candidatesTokenCount while
+    // also supplying thoughtsTokenCount <= candidatesTokenCount, subtract thoughtsTokenCount so
+    // it is never double-counted in total_tokens or cost_usd.
+    const includedInCandidates =
+      reasoning_tokens > 0 &&
+      typeof usage.totalTokenCount === 'number' &&
+      Number.isFinite(usage.totalTokenCount) &&
+      usage.totalTokenCount === input_tokens + rawOutputTokens &&
+      rawOutputTokens >= reasoning_tokens;
+    const output_tokens = includedInCandidates ? rawOutputTokens - reasoning_tokens : rawOutputTokens;
+
+    const summedTotal = input_tokens + output_tokens + reasoning_tokens;
     const total_tokens = Math.max(
-      input_tokens + output_tokens + reasoning_tokens,
+      summedTotal,
       typeof usage.totalTokenCount === 'number' && Number.isFinite(usage.totalTokenCount) ? usage.totalTokenCount : 0
     );
     const latency_ms = Date.now() - startTime;

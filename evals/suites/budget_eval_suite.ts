@@ -27,6 +27,7 @@ import {
   assertWithinSpendingGuard,
   buildLiveProviderProfile,
   estimateProjectedEvalCost,
+  getProviderPricing,
   resolveLiveProviderProfile,
 } from './spending_guard.js';
 import {
@@ -40,6 +41,7 @@ import {
   BENCHMARK_QUALITY_FLOORS,
   BenchmarkSource,
   CostMethodology,
+  DATASET_HASH_ALGORITHM,
   ModelConfigurationSnapshot,
   VerifierResultsSummary,
   computeDatasetHash,
@@ -86,6 +88,7 @@ export interface BudgetEvalResult {
   split: 'held_out' | 'tuning';
   dataset_version: string;
   dataset_hash: string;
+  dataset_hash_algorithm: typeof DATASET_HASH_ALGORITHM;
   timestamp: string;
   execution_date: string;
   run_command: string;
@@ -833,7 +836,7 @@ function get50Queries(category: 'factual' | 'math' | 'code' | 'extraction'): Eva
   return DISTINCT_BUDGET_QUERIES[category];
 }
 
-function getTestCasesForSplit(split: 'held_out' | 'tuning', limitPerCategory?: number): EvalQueryCase[] {
+export function getBudgetEvalCanonicalCases(split: 'held_out' | 'tuning', limitPerCategory?: number): EvalQueryCase[] {
   const categories: Array<'factual' | 'math' | 'code' | 'extraction'> = ['factual', 'math', 'code', 'extraction'];
   const cap = limitPerCategory !== undefined && limitPerCategory > 0 ? Math.floor(limitPerCategory) : undefined;
   if (split === 'held_out') {
@@ -842,13 +845,20 @@ function getTestCasesForSplit(split: 'held_out' | 'tuning', limitPerCategory?: n
       return cap !== undefined ? queries.slice(0, cap) : queries;
     });
   }
-  const tuning = [
-    DISTINCT_BUDGET_QUERIES.factual[0],
-    DISTINCT_BUDGET_QUERIES.math[0],
-    DISTINCT_BUDGET_QUERIES.code[0],
-    DISTINCT_BUDGET_QUERIES.extraction[0],
-  ];
-  return cap !== undefined ? tuning.slice(0, cap * categories.length) : tuning;
+  if (split === 'tuning') {
+    const tuning = [
+      DISTINCT_BUDGET_QUERIES.factual[0],
+      DISTINCT_BUDGET_QUERIES.math[0],
+      DISTINCT_BUDGET_QUERIES.code[0],
+      DISTINCT_BUDGET_QUERIES.extraction[0],
+    ];
+    return cap !== undefined ? tuning.slice(0, cap * categories.length) : tuning;
+  }
+  throw new Error(`[AEL Benchmark Error] Unsupported budget benchmark split '${String(split)}'. Expected 'held_out' or 'tuning'.`);
+}
+
+function getTestCasesForSplit(split: 'held_out' | 'tuning', limitPerCategory?: number): EvalQueryCase[] {
+  return getBudgetEvalCanonicalCases(split, limitPerCategory);
 }
 
 export function buildLiveGeminiBudgetProfile(model?: string): ProviderProfile {
@@ -1165,6 +1175,7 @@ export async function runBudgetEvalSuite(
     Object.entries(categoryResults).map(([cat, m]) => [cat, m.total_samples])
   );
   const datasetHash = computeDatasetHash(testCases);
+  const pricingProvenance = getProviderPricing(provider.type as LiveProviderType, provider.default_model);
 
   const result: BudgetEvalResult = {
     suite_name: `AERA/CoBa Thinking Budget Comparative Benchmark (${split.toUpperCase()})`,
@@ -1175,6 +1186,7 @@ export async function runBudgetEvalSuite(
     split,
     dataset_version: BUDGET_EVAL_DATASET_VERSION,
     dataset_hash: datasetHash,
+    dataset_hash_algorithm: DATASET_HASH_ALGORITHM,
     timestamp: now.toISOString(),
     execution_date: dateStr,
     run_command: cmdParts.join(' '),
@@ -1231,12 +1243,16 @@ export async function runBudgetEvalSuite(
     },
     cost_methodology: {
       billing_basis: 'estimated_from_provider_usage_and_profile_rates',
+      cost_estimation_status: 'estimated_only_not_provider_billed',
       provider_billed_cost_reported: false,
       usage_source: 'provider_reported',
       currency: 'USD',
-      input_cost_per_million: provider.input_cost_per_million,
-      output_cost_per_million: provider.output_cost_per_million,
-      reasoning_cost_per_million: provider.reasoning_cost_per_million,
+      pricing_model: pricingProvenance.model,
+      pricing_source: pricingProvenance.pricing_source,
+      pricing_last_updated: pricingProvenance.pricing_last_updated,
+      input_cost_per_million: pricingProvenance.input,
+      output_cost_per_million: pricingProvenance.output,
+      reasoning_cost_per_million: pricingProvenance.reasoning,
       verification_cost_excluded_from_product_savings: true,
     },
     savings_claims_valid: passedAcceptance,

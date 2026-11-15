@@ -30,24 +30,158 @@ export function assertValidGeminiKey(rawKey?: string): string {
   return key;
 }
 
-export function getProviderPricing(providerType: LiveProviderType, model: string): { input: number; output: number; reasoning: number } {
-  if (providerType === 'gemini') {
-    if (/2\.5-pro/i.test(model)) {
-      return { input: 1.25, output: 10.0, reasoning: 10.0 };
-    }
-    return { input: 0.10, output: 0.40, reasoning: 0.40 };
+export interface ProviderPricingEntry {
+  provider: LiveProviderType;
+  model: string;
+  input: number;
+  output: number;
+  reasoning: number;
+  pricing_source: string;
+  pricing_last_updated: string;
+  is_estimated_rate_card: true;
+}
+
+export const PRICING_CATALOG_LAST_UPDATED = '2026-11-15';
+
+const PROVIDER_PRICING_CATALOG: Record<LiveProviderType, Record<string, Omit<ProviderPricingEntry, 'provider' | 'model' | 'is_estimated_rate_card'>>> = {
+  gemini: {
+    'gemini-2.5-flash': {
+      input: 0.15,
+      output: 0.60,
+      reasoning: 0.60,
+      pricing_source: 'Google Gemini API Pricing (https://ai.google.dev/gemini-api/docs/pricing) — standard rate card snapshot',
+      pricing_last_updated: PRICING_CATALOG_LAST_UPDATED,
+    },
+    'gemini-2.5-flash-lite': {
+      input: 0.10,
+      output: 0.40,
+      reasoning: 0.40,
+      pricing_source: 'Google Gemini API Pricing (https://ai.google.dev/gemini-api/docs/pricing) — Flash-Lite rate card snapshot',
+      pricing_last_updated: PRICING_CATALOG_LAST_UPDATED,
+    },
+    'gemini-2.5-pro': {
+      input: 1.25,
+      output: 10.0,
+      reasoning: 10.0,
+      pricing_source: 'Google Gemini API Pricing (https://ai.google.dev/gemini-api/docs/pricing) — Pro <=200k tier snapshot',
+      pricing_last_updated: PRICING_CATALOG_LAST_UPDATED,
+    },
+    'gemini-3-flash-preview': {
+      input: 0.50,
+      output: 3.00,
+      reasoning: 3.00,
+      pricing_source: 'Google Gemini API Pricing (https://ai.google.dev/gemini-api/docs/pricing) — Gemini 3 Flash preview snapshot',
+      pricing_last_updated: PRICING_CATALOG_LAST_UPDATED,
+    },
+    'gemini-3-pro-preview': {
+      input: 2.00,
+      output: 12.00,
+      reasoning: 12.00,
+      pricing_source: 'Google Gemini API Pricing (https://ai.google.dev/gemini-api/docs/pricing) — Gemini 3 Pro preview snapshot',
+      pricing_last_updated: PRICING_CATALOG_LAST_UPDATED,
+    },
+    'gemini-3.1-flash-lite': {
+      input: 0.10,
+      output: 0.40,
+      reasoning: 0.40,
+      pricing_source: 'Google Gemini API Pricing (https://ai.google.dev/gemini-api/docs/pricing) — Flash-Lite snapshot',
+      pricing_last_updated: PRICING_CATALOG_LAST_UPDATED,
+    },
+    'gemini-4-hydrogen': {
+      input: 0.50,
+      output: 3.00,
+      reasoning: 3.00,
+      pricing_source: 'Google Gemini API Pricing (https://ai.google.dev/gemini-api/docs/pricing) — Flash-tier rate card snapshot',
+      pricing_last_updated: PRICING_CATALOG_LAST_UPDATED,
+    },
+    'gemini-4-argon': {
+      input: 2.00,
+      output: 12.00,
+      reasoning: 12.00,
+      pricing_source: 'Google Gemini API Pricing (https://ai.google.dev/gemini-api/docs/pricing) — Pro-tier rate card snapshot',
+      pricing_last_updated: PRICING_CATALOG_LAST_UPDATED,
+    },
+  },
+  openai: {
+    'gpt-4o-mini': {
+      input: 0.15,
+      output: 0.60,
+      reasoning: 0.60,
+      pricing_source: 'OpenAI API Pricing (https://openai.com/api/pricing) — gpt-4o-mini standard snapshot',
+      pricing_last_updated: PRICING_CATALOG_LAST_UPDATED,
+    },
+    'gpt-4o-mini-2024-07-18': {
+      input: 0.15,
+      output: 0.60,
+      reasoning: 0.60,
+      pricing_source: 'OpenAI API Pricing (https://openai.com/api/pricing) — gpt-4o-mini dated snapshot',
+      pricing_last_updated: PRICING_CATALOG_LAST_UPDATED,
+    },
+    'gpt-4o': {
+      input: 2.50,
+      output: 10.00,
+      reasoning: 10.00,
+      pricing_source: 'OpenAI API Pricing (https://openai.com/api/pricing) — gpt-4o standard snapshot',
+      pricing_last_updated: PRICING_CATALOG_LAST_UPDATED,
+    },
+    'o3-mini': {
+      input: 1.10,
+      output: 4.40,
+      reasoning: 4.40,
+      pricing_source: 'OpenAI API Pricing (https://openai.com/api/pricing) — o3-mini standard snapshot',
+      pricing_last_updated: PRICING_CATALOG_LAST_UPDATED,
+    },
+    'o1': {
+      input: 15.00,
+      output: 60.00,
+      reasoning: 60.00,
+      pricing_source: 'OpenAI API Pricing (https://openai.com/api/pricing) — o1 standard snapshot',
+      pricing_last_updated: PRICING_CATALOG_LAST_UPDATED,
+    },
+  },
+  anthropic: {
+    'claude-3-5-haiku-20241022': {
+      input: 0.80,
+      output: 4.00,
+      reasoning: 4.00,
+      pricing_source: 'Anthropic Pricing (https://www.anthropic.com/pricing) — Claude 3.5 Haiku snapshot',
+      pricing_last_updated: PRICING_CATALOG_LAST_UPDATED,
+    },
+    'claude-3-7-sonnet-20250219': {
+      input: 3.00,
+      output: 15.00,
+      reasoning: 15.00,
+      pricing_source: 'Anthropic Pricing (https://www.anthropic.com/pricing) — Claude 3.7 Sonnet snapshot',
+      pricing_last_updated: PRICING_CATALOG_LAST_UPDATED,
+    },
+    'claude-sonnet-4-20250514': {
+      input: 3.00,
+      output: 15.00,
+      reasoning: 15.00,
+      pricing_source: 'Anthropic Pricing (https://www.anthropic.com/pricing) — Claude Sonnet 4 snapshot',
+      pricing_last_updated: PRICING_CATALOG_LAST_UPDATED,
+    },
+  },
+};
+
+export function getProviderPricing(providerType: LiveProviderType, model: string): ProviderPricingEntry {
+  const normalizedModel = (model || '').trim();
+  const catalog = PROVIDER_PRICING_CATALOG[providerType];
+  if (!catalog) {
+    throw new Error(`[AEL Pricing Error] Unknown provider '${String(providerType)}'.`);
   }
-  if (providerType === 'openai') {
-    if (/o3-mini|o1|gpt-4o(?!-mini)/i.test(model)) {
-      return { input: 1.10, output: 4.40, reasoning: 4.40 };
-    }
-    return { input: 0.15, output: 0.60, reasoning: 0.60 };
+  const entry = catalog[normalizedModel];
+  if (!entry) {
+    throw new Error(
+      `[AEL Pricing Error] Unknown or uncatalogued model '${normalizedModel}' for provider '${providerType}'. Refusing to silently apply an unrelated default rate. Supported models: ${Object.keys(catalog).join(', ')}.`
+    );
   }
-  // anthropic
-  if (/sonnet/i.test(model)) {
-    return { input: 3.00, output: 15.0, reasoning: 15.0 };
-  }
-  return { input: 0.80, output: 4.00, reasoning: 4.00 };
+  return {
+    provider: providerType,
+    model: normalizedModel,
+    ...entry,
+    is_estimated_rate_card: true,
+  };
 }
 
 export function buildLiveProviderProfile(providerType: LiveProviderType, model?: string): ProviderProfile {

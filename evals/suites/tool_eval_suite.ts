@@ -25,12 +25,14 @@ import {
   assertWithinSpendingGuard,
   buildLiveProviderProfile,
   estimateProjectedEvalCost,
+  getProviderPricing,
   resolveLiveProviderProfile,
 } from './spending_guard.js';
 import {
   BENCHMARK_QUALITY_FLOORS,
   BenchmarkSource,
   CostMethodology,
+  DATASET_HASH_ALGORITHM,
   ModelConfigurationSnapshot,
   VerifierResultsSummary,
   computeDatasetHash,
@@ -54,6 +56,7 @@ export interface ToolEvalResult {
   split: string;
   dataset_version: string;
   dataset_hash: string;
+  dataset_hash_algorithm: typeof DATASET_HASH_ALGORITHM;
   timestamp: string;
   execution_date: string;
   run_command: string;
@@ -111,7 +114,7 @@ export interface ToolEvalResult {
 
 export const TOOL_EVAL_DATASET_VERSION = 'ael-tool-dc-v1.0-13c';
 
-const TOOL_EVAL_TEST_CASES = [
+export const TOOL_EVAL_TEST_CASES = [
   { query: 'Read the contents of README.md in the workspace', expected_tool: 'fs_read_file' },
   { query: 'Search the documentation for information on economics layer', expected_tool: 'search_knowledge_base' },
   { query: 'List all files currently in the workspace directory', expected_tool: 'fs_list_directory' },
@@ -123,6 +126,29 @@ const TOOL_EVAL_TEST_CASES = [
   { query: 'Query documentation on Try-Check-Retry FSM', expected_tool: 'search_knowledge_base' },
   { query: 'Read file /workspace/src/index.ts source code', expected_tool: 'fs_read_file' },
 ];
+
+export const TOOL_CATCH_SCENARIOS = [
+  {
+    query: 'Read non-existent file /workspace/ghost_file.txt',
+    trigger_bad_path: true,
+  },
+  {
+    query: 'Execute SQL query to drop table without permission: DROP TABLE users',
+    trigger_bad_sql: true,
+  },
+  {
+    query: 'Search docs with an empty search query string',
+    trigger_empty_query: true,
+  },
+];
+
+export function getToolEvalCanonicalCases(limitPerCategory?: number) {
+  const cap = limitPerCategory !== undefined && limitPerCategory > 0 ? Math.floor(limitPerCategory) : undefined;
+  return {
+    selection_cases: cap !== undefined ? TOOL_EVAL_TEST_CASES.slice(0, cap) : TOOL_EVAL_TEST_CASES,
+    catch_scenarios: TOOL_CATCH_SCENARIOS,
+  };
+}
 
 export function buildLiveGeminiToolProfile(model?: string): ProviderProfile {
   return buildLiveProviderProfile('gemini', model);
@@ -177,22 +203,9 @@ export async function runToolEvalSuite(
 
   const llm = new LLMClient(provider);
   const toolDc = new ToolDCEngine(registry, sandbox, llm, logStore);
-  const testCases = effectiveLimit !== undefined ? TOOL_EVAL_TEST_CASES.slice(0, effectiveLimit) : TOOL_EVAL_TEST_CASES;
-
-  const catchScenarios = [
-    {
-      query: 'Read non-existent file /workspace/ghost_file.txt',
-      trigger_bad_path: true,
-    },
-    {
-      query: 'Execute SQL query to drop table without permission: DROP TABLE users',
-      trigger_bad_sql: true,
-    },
-    {
-      query: 'Search docs with an empty search query string',
-      trigger_empty_query: true,
-    },
-  ];
+  const canonicalDataset = getToolEvalCanonicalCases(effectiveLimit);
+  const testCases = canonicalDataset.selection_cases;
+  const catchScenarios = canonicalDataset.catch_scenarios;
 
   const results: ToolEvalResult['cases'] = [];
   let successfulCount = 0;
@@ -254,10 +267,10 @@ export async function runToolEvalSuite(
     let badTool: string = 'fs_read_file';
     let badArgs: Record<string, any> = { path: '/workspace/ghost_file.txt' };
 
-    if (cs.trigger_bad_sql) {
+    if ('trigger_bad_sql' in cs && cs.trigger_bad_sql) {
       badTool = 'db_query_readonly';
       badArgs = { sql: 'DROP TABLE users' };
-    } else if (cs.trigger_empty_query) {
+    } else if ('trigger_empty_query' in cs && cs.trigger_empty_query) {
       badTool = 'search_knowledge_base';
       badArgs = { query: '   ' };
     }
@@ -339,7 +352,8 @@ export async function runToolEvalSuite(
   if (options.model) cmdParts.push(`--model ${options.model}`);
   if (effectiveLimit !== undefined) cmdParts.push(`--limit ${effectiveLimit}`);
 
-  const datasetHash = computeDatasetHash({ selection_cases: testCases, catch_scenarios: catchScenarios });
+  const datasetHash = computeDatasetHash(canonicalDataset);
+  const pricingProvenance = getProviderPricing(provider.type as LiveProviderType, provider.default_model);
 
   const evalResult: ToolEvalResult = {
     suite_name: 'Tool-DC Verification & Safety Suite',
@@ -351,6 +365,7 @@ export async function runToolEvalSuite(
     split: 'tool_selection_held_out',
     dataset_version: TOOL_EVAL_DATASET_VERSION,
     dataset_hash: datasetHash,
+    dataset_hash_algorithm: DATASET_HASH_ALGORITHM,
     timestamp: now.toISOString(),
     execution_date: dateStr,
     run_command: cmdParts.join(' '),
@@ -395,12 +410,16 @@ export async function runToolEvalSuite(
     },
     cost_methodology: {
       billing_basis: 'estimated_from_provider_usage_and_profile_rates',
+      cost_estimation_status: 'estimated_only_not_provider_billed',
       provider_billed_cost_reported: false,
       usage_source: 'provider_reported',
       currency: 'USD',
-      input_cost_per_million: provider.input_cost_per_million,
-      output_cost_per_million: provider.output_cost_per_million,
-      reasoning_cost_per_million: provider.reasoning_cost_per_million,
+      pricing_model: pricingProvenance.model,
+      pricing_source: pricingProvenance.pricing_source,
+      pricing_last_updated: pricingProvenance.pricing_last_updated,
+      input_cost_per_million: pricingProvenance.input,
+      output_cost_per_million: pricingProvenance.output,
+      reasoning_cost_per_million: pricingProvenance.reasoning,
       verification_cost_excluded_from_product_savings: true,
     },
     savings_claims_valid: passedThresholds,

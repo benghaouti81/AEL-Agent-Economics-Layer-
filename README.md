@@ -41,13 +41,13 @@ Every generated benchmark report in `evals/results/<YYYY-MM-DD>_live_*.json` mus
 - `source`: `"live_provider"` (any `"unit_test"`, simulated, or unknown source is permanently rejected)
 - `provider` & `model`: actual upstream provider (`"gemini" | "openai" | "anthropic"`) and exact model ID
 - `credential_status`: `"live_credentials_present"` (no secrets exposed)
-- `split`, `dataset_version`, & `dataset_hash`: SHA-256 hash of the evaluated query set
-- `sample_size.valid_samples`: must be $> 0$
+- `split`, `dataset_version`, `dataset_hash_algorithm` (`"sha256-canonical-json-v1"`), & `dataset_hash`: independently recomputed SHA-256 over canonical JSON (sorted object keys, `undefined` omitted, array order preserved) of the exact evaluated cases for `(dataset_version, split, limit_per_category)`
+- `sample_size.valid_samples`: must be $> 0$ and match the canonical evaluated dataset count
 - `model_config`: active model routing & reasoning capabilities snapshot
 - `token_usage`: actual provider-reported input, output, reasoning, and total tokens (`usage_source: "provider_reported"`; missing provider usage fails explicitly)
 - `verifier_results`: passed, failed, and errored verification counts (`errored === 0` required)
-- `accuracy_metrics`: explicit baseline and AEL accuracy against configured absolute quality floors (zero-on-both-sides cannot pass)
-- `cost_methodology`: distinguishes rates-based calculation from provider-billed invoice totals and excludes verifier/judge costs from product savings
+- `accuracy_metrics`: separates validity guardrails (`STATISTICAL_AND_VALIDITY_FLOORS`: $\ge 50\%$ baseline and AEL accuracy floors to block broken/zero-on-both-sides runs) from project acceptance targets (`PROJECT_ACCEPTANCE_TARGETS`: $\le 2\text{ pp}$ drop, $\ge 50\%$ token reduction, $< 500\text{ms}$ p95 overhead, $\ge 90\%$ tool accuracy, $\ge 3$ dry-run catches). Note: on `--limit 5` smoke runs ($N=20$), 1 query equals $5\text{ pp}$, so small-sample runs are not statistically powered non-inferiority proofs.
+- `cost_methodology`: records exact `pricing_model`, `pricing_source`, `pricing_last_updated`, and `cost_estimation_status: "estimated_only_not_provider_billed"` (`provider_billed_cost_reported: false`); refuses uncatalogued models rather than falling back to default family rates, and excludes verifier/judge costs from product savings
 - `timestamp`: ISO-8601 evaluation timestamp
 - `savings_claims_valid`: failed evaluations suppress headline net token/USD savings claims (`null`)
 

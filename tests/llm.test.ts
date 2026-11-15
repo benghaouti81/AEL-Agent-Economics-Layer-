@@ -589,6 +589,199 @@ describe('LLMClient Adapter Layer', () => {
       vi.useRealTimers();
     }
   });
+
+  // NOTE: Tests below exercise adapter request construction and usage parsing against realistic
+  // provider response fixtures / stubs — they verify adapter logic ONLY and are NOT live API checks.
+  it('selects thinkingLevel for Gemini 4 (lowest=LOW, never MINIMAL) and Gemini 3 vs thinkingBudget for Gemini 2.5 Pro/Flash via realistic fixtures', async () => {
+    process.env.GEMINI_API_KEY = 'gem-test-adapter-fixtures';
+
+    // 1. Gemini 4 (gemini-4-hydrogen, plus models/ prefix): auto-selects thinkingLevel; 'none' maps to LOW
+    const gemini4Client = new LLMClient({
+      name: 'gemini_4_fixture',
+      type: 'gemini',
+      api_key_env: 'GEMINI_API_KEY',
+      default_model: 'gemini-4-hydrogen',
+      cheap_model: 'gemini-4-hydrogen',
+      reasoning_model: 'gemini-4-argon',
+      supports_reasoning_effort: true,
+      supports_logprobs: false,
+      input_cost_per_million: 0.5,
+      output_cost_per_million: 3.0,
+      reasoning_cost_per_million: 3.0,
+    });
+    const g4Spy = vi.fn().mockResolvedValue({
+      candidates: [{ content: { parts: [{ text: '42' }] } }],
+      usageMetadata: {
+        promptTokenCount: 18,
+        candidatesTokenCount: 4,
+        thoughtsTokenCount: 120,
+        totalTokenCount: 142,
+      },
+    });
+    (gemini4Client as any).geminiClient = { models: { generateContent: g4Spy } };
+
+    await gemini4Client.complete('q4_none', { reasoning_effort: 'none' });
+    await gemini4Client.complete('q4_low', { reasoning_effort: 'low', model: 'models/gemini-4-hydrogen' });
+    await gemini4Client.complete('q4_medium', { reasoning_effort: 'medium' });
+    await gemini4Client.complete('q4_high', { reasoning_effort: 'high', model: 'gemini-4-argon' });
+
+    expect(g4Spy.mock.calls[0][0].config.thinkingConfig).toEqual({ thinkingLevel: 'LOW' });
+    expect(g4Spy.mock.calls[1][0].config.thinkingConfig).toEqual({ thinkingLevel: 'LOW' });
+    expect(g4Spy.mock.calls[2][0].config.thinkingConfig).toEqual({ thinkingLevel: 'MEDIUM' });
+    expect(g4Spy.mock.calls[3][0].config.thinkingConfig).toEqual({ thinkingLevel: 'HIGH' });
+    for (const call of g4Spy.mock.calls) {
+      expect(call[0].config.thinkingConfig.thinkingBudget).toBeUndefined();
+    }
+
+    // 2. Gemini 3 (gemini-3-flash-preview) without explicit gemini_thinking_mode still selects thinkingLevel
+    const gemini3Client = new LLMClient({
+      name: 'gemini_3_fixture',
+      type: 'gemini',
+      api_key_env: 'GEMINI_API_KEY',
+      default_model: 'gemini-3-flash-preview',
+      cheap_model: 'gemini-3-flash-preview',
+      reasoning_model: 'gemini-3-pro-preview',
+      supports_reasoning_effort: true,
+      supports_logprobs: false,
+      input_cost_per_million: 0.5,
+      output_cost_per_million: 3.0,
+      reasoning_cost_per_million: 3.0,
+    });
+    const g3Spy = vi.fn().mockResolvedValue({
+      text: 'ok',
+      usageMetadata: { promptTokenCount: 12, candidatesTokenCount: 3, thoughtsTokenCount: 8, totalTokenCount: 23 },
+    });
+    (gemini3Client as any).geminiClient = { models: { generateContent: g3Spy } };
+
+    await gemini3Client.complete('q3_none', { reasoning_effort: 'none' });
+    await gemini3Client.complete('q3_high', { reasoning_effort: 'high' });
+    expect(g3Spy.mock.calls[0][0].config.thinkingConfig).toEqual({ thinkingLevel: 'MINIMAL' });
+    expect(g3Spy.mock.calls[1][0].config.thinkingConfig).toEqual({ thinkingLevel: 'HIGH' });
+
+    // 3. Gemini 2.5 Pro sets minimum 128 on 'none' while Gemini 2.5 Flash sets 0
+    const gemini25ProClient = new LLMClient({
+      name: 'gemini_25_pro_fixture',
+      type: 'gemini',
+      api_key_env: 'GEMINI_API_KEY',
+      default_model: 'gemini-2.5-pro',
+      cheap_model: 'gemini-2.5-flash-lite',
+      reasoning_model: 'gemini-2.5-pro',
+      supports_reasoning_effort: true,
+      supports_logprobs: false,
+      input_cost_per_million: 1.25,
+      output_cost_per_million: 10.0,
+      reasoning_cost_per_million: 10.0,
+    });
+    const g25Spy = vi.fn().mockResolvedValue({
+      text: 'ok',
+      usageMetadata: { promptTokenCount: 20, candidatesTokenCount: 5, thoughtsTokenCount: 10, totalTokenCount: 35 },
+    });
+    (gemini25ProClient as any).geminiClient = { models: { generateContent: g25Spy } };
+    await gemini25ProClient.complete('q25_pro_none', { reasoning_effort: 'none' });
+    expect(g25Spy.mock.calls[0][0].config.thinkingConfig).toEqual({ thinkingBudget: 128 });
+  });
+
+  it('prevents reasoning token double-counting on both inclusive and disjoint response fixtures and rejects invalid thoughtsTokenCount', async () => {
+    process.env.GEMINI_API_KEY = 'gem-test-usage-fixtures';
+    const geminiClient = new LLMClient({
+      name: 'gemini_counting_fixture',
+      type: 'gemini',
+      api_key_env: 'GEMINI_API_KEY',
+      default_model: 'gemini-2.5-flash',
+      cheap_model: 'gemini-2.5-flash-lite',
+      reasoning_model: 'gemini-2.5-pro',
+      supports_reasoning_effort: true,
+      supports_logprobs: false,
+      input_cost_per_million: 1.0,
+      output_cost_per_million: 2.0,
+      reasoning_cost_per_million: 2.0,
+    });
+
+    const gemSpy = vi
+      .fn()
+      // Disjoint: total = 100 + 40 + 180 = 320
+      .mockResolvedValueOnce({
+        text: 'disjoint response',
+        usageMetadata: {
+          promptTokenCount: 100,
+          candidatesTokenCount: 40,
+          thoughtsTokenCount: 180,
+          totalTokenCount: 320,
+        },
+      })
+      // Inclusive candidatesTokenCount (total === prompt + candidates while thoughts <= candidates): total = 100 + 220 = 320
+      .mockResolvedValueOnce({
+        text: 'inclusive response',
+        usageMetadata: {
+          promptTokenCount: 100,
+          candidatesTokenCount: 220,
+          thoughtsTokenCount: 180,
+          totalTokenCount: 320,
+        },
+      })
+      // Corrupted negative thoughtsTokenCount must fail explicitly rather than zeroing
+      .mockResolvedValueOnce({
+        text: 'bad usage',
+        usageMetadata: {
+          promptTokenCount: 100,
+          candidatesTokenCount: 40,
+          thoughtsTokenCount: -5,
+        },
+      });
+    (geminiClient as any).geminiClient = { models: { generateContent: gemSpy } };
+
+    const disjointRes = await geminiClient.complete('disjoint');
+    expect(disjointRes.input_tokens).toBe(100);
+    expect(disjointRes.output_tokens).toBe(40);
+    expect(disjointRes.reasoning_tokens).toBe(180);
+    expect(disjointRes.total_tokens).toBe(320);
+    expect(disjointRes.cost_usd).toBe(geminiClient.calculateCost(100, 40, 180));
+
+    const inclusiveRes = await geminiClient.complete('inclusive');
+    expect(inclusiveRes.input_tokens).toBe(100);
+    expect(inclusiveRes.output_tokens).toBe(40);
+    expect(inclusiveRes.reasoning_tokens).toBe(180);
+    expect(inclusiveRes.total_tokens).toBe(320);
+    expect(inclusiveRes.cost_usd).toBe(geminiClient.calculateCost(100, 40, 180));
+
+    await expect(geminiClient.complete('invalid-thoughts')).rejects.toThrow(/thoughtsTokenCount/);
+
+    // OpenAI inclusive completion_tokens fixture (standard Chat Completions API: completion_tokens includes reasoning_tokens)
+    process.env.TEST_OPENAI_KEY = 'sk-test-usage-fixtures';
+    const openaiClient = new LLMClient({
+      name: 'openai_counting_fixture',
+      type: 'openai',
+      api_key_env: 'TEST_OPENAI_KEY',
+      default_model: 'gpt-4o-mini',
+      cheap_model: 'gpt-4o-mini',
+      reasoning_model: 'o3-mini',
+      supports_reasoning_effort: true,
+      supports_logprobs: false,
+      input_cost_per_million: 1.0,
+      output_cost_per_million: 2.0,
+      reasoning_cost_per_million: 2.0,
+    });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        model: 'o3-mini',
+        choices: [{ message: { content: 'inclusive openai response' } }],
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 220,
+          total_tokens: 320,
+          completion_tokens_details: { reasoning_tokens: 180 },
+        },
+      }),
+    }));
+
+    const oaiInclusive = await openaiClient.complete('o3 test', { reasoning_effort: 'high' });
+    expect(oaiInclusive.input_tokens).toBe(100);
+    expect(oaiInclusive.output_tokens).toBe(40);
+    expect(oaiInclusive.reasoning_tokens).toBe(180);
+    expect(oaiInclusive.total_tokens).toBe(320);
+    expect(oaiInclusive.cost_usd).toBe(openaiClient.calculateCost(100, 40, 180));
+  });
 });
 
 async function geminiClientOrFallback(client: LLMClient) {

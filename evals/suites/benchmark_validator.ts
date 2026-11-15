@@ -2,26 +2,64 @@
  * AEL — Benchmark Evidence Provenance & Acceptance Validator
  * Enforces strict evidence integrity rules:
  * - Only "live_provider" source accepted (never legacy simulator or "unit_test")
- * - Full provider, model, credential status, dataset hash, token accounting, verifier, and cost methodology required
+ * - Verifiable SHA-256 dataset hash recomputed against canonical evaluated cases
+ * - Full provider, exact model pricing provenance, credential status, token accounting, and verifier integrity required
  * - Rejects zero-valid-sample evaluations, failed verifiers, and below-floor accuracy (including 0/N vs 0/N)
  * - Prohibits failed evaluations from emitting misleading savings claims
  * @license Apache-2.0
  */
 
 import crypto from 'node:crypto';
+import { BUDGET_EVAL_DATASET_VERSION, getBudgetEvalCanonicalCases } from './budget_eval_suite.js';
+import { TOOL_EVAL_DATASET_VERSION, getToolEvalCanonicalCases } from './tool_eval_suite.js';
 
 export type BenchmarkSource = 'live_provider' | 'unit_test';
 
 export const ALLOWED_LIVE_PROVIDERS = ['gemini', 'openai', 'anthropic'] as const;
 
-export const BENCHMARK_QUALITY_FLOORS = {
+export const DATASET_HASH_ALGORITHM = 'sha256-canonical-json-v1' as const;
+
+/**
+ * Measurement-validity and minimum-competence guardrails.
+ *
+ * Rationale & Limitations:
+ * - These 50% floors are validity guards, not universal statistical theorems: across heterogeneous
+ *   open-ended tasks (math, code synthesis, structured JSON extraction, factual recall), 50%
+ *   prevents degenerate "0/N baseline vs 0/N AEL (0 pp drop)" or compute-starved garbage-output
+ *   runs from passing parity checks.
+ * - Limitation: aggregate >= 50% across 4 categories can still mask single-category collapse,
+ *   and does not substitute for item-difficulty calibration or confidence intervals.
+ */
+export const STATISTICAL_AND_VALIDITY_FLOORS = {
+  budget_min_baseline_accuracy: 0.50,
+  budget_min_ael_accuracy: 0.50,
+} as const;
+
+/**
+ * Project-specific product & SLA acceptance targets (Definition of Done #1-#3, #7).
+ *
+ * Rationale & Limitations:
+ * - `budget_max_accuracy_drop_pp` (2.0 pp): engineering parity SLA, NOT a statistically powered
+ *   non-inferiority margin. On the full 200-query split (`N=200`), 1 query equals 0.5 pp and binomial
+ *   SE at p=0.85 is ~2.5 pp; on `--limit 5` (`N=20`), 1 query equals 5.0 pp and binomial SE is ~8-11 pp,
+ *   so small `--limit` smoke runs cannot establish statistical non-inferiority.
+ * - `budget_min_token_reduction_pct` (50.0%): product economic-value bar requiring reasoning-capable
+ *   models where AEL's adaptive effort ladder can eliminate excess thinking tokens.
+ * - `budget_max_p95_overhead_ms` (500ms): middleware CPU/SQLite latency SLA excluding upstream LLM I/O.
+ * - `tool_selection_accuracy` (0.90) & `tool_dry_run_catches` (3): DoD #1/#2 acceptance bar on 10
+ *   selection cases + 3 seeded fault scenarios (`N=10` gives wide binomial 95% CIs ~0.56-0.98).
+ */
+export const PROJECT_ACCEPTANCE_TARGETS = {
   tool_selection_accuracy: 0.90,
   tool_dry_run_catches: 3,
   budget_min_token_reduction_pct: 50.0,
   budget_max_accuracy_drop_pp: 2.0,
   budget_max_p95_overhead_ms: 500,
-  budget_min_baseline_accuracy: 0.50,
-  budget_min_ael_accuracy: 0.50,
+} as const;
+
+export const BENCHMARK_QUALITY_FLOORS = {
+  ...STATISTICAL_AND_VALIDITY_FLOORS,
+  ...PROJECT_ACCEPTANCE_TARGETS,
 } as const;
 
 export interface ModelConfigurationSnapshot {
@@ -36,9 +74,13 @@ export interface ModelConfigurationSnapshot {
 
 export interface CostMethodology {
   billing_basis: 'estimated_from_provider_usage_and_profile_rates' | 'provider_billed';
+  cost_estimation_status: 'estimated_only_not_provider_billed' | 'provider_billed_verified';
   provider_billed_cost_reported: boolean;
   usage_source: 'provider_reported';
   currency: 'USD';
+  pricing_model: string;
+  pricing_source: string;
+  pricing_last_updated: string;
   input_cost_per_million: number;
   output_cost_per_million: number;
   reasoning_cost_per_million: number;
@@ -58,8 +100,40 @@ export interface BenchmarkValidationResult {
   errors: string[];
 }
 
+/**
+ * Canonical JSON serialization (`sha256-canonical-json-v1`):
+ * - Arrays preserve exact element order (reordering cases changes the digest).
+ * - Plain objects sort own enumerable keys lexicographically and omit `undefined` properties
+ *   so equivalent objects serialize identically regardless of JS property insertion order.
+ * - Primitives use standard JSON encoding (`null`, booleans, finite numbers, strings).
+ */
+export function canonicalizeJson(value: unknown): string {
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') {
+    return JSON.stringify(value);
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? JSON.stringify(value) : 'null';
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(item => (item === undefined ? 'null' : canonicalizeJson(item))).join(',')}]`;
+  }
+  if (typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    const keys = Object.keys(obj)
+      .filter(k => obj[k] !== undefined && typeof obj[k] !== 'function' && typeof obj[k] !== 'symbol')
+      .sort();
+    return `{${keys.map(k => `${JSON.stringify(k)}:${canonicalizeJson(obj[k])}`).join(',')}}`;
+  }
+  return 'null';
+}
+
+/**
+ * Computes lowercase hex SHA-256 over the canonical JSON representation (`sha256-canonical-json-v1`)
+ * of the exact evaluated dataset cases. Any case addition, deletion, reordering, or field edit
+ * changes the resulting digest.
+ */
 export function computeDatasetHash(canonicalCases: unknown): string {
-  return crypto.createHash('sha256').update(JSON.stringify(canonicalCases)).digest('hex');
+  return crypto.createHash('sha256').update(canonicalizeJson(canonicalCases), 'utf8').digest('hex');
 }
 
 function containsRawSecretPattern(value: unknown): boolean {
@@ -75,9 +149,59 @@ function isFiniteNonNeg(val: unknown): val is number {
   return typeof val === 'number' && Number.isFinite(val) && val >= 0;
 }
 
+function resolveCanonicalDatasetForResult(data: any): {
+  resolved: boolean;
+  canonicalDataset?: unknown;
+  expectedCount?: number;
+  error?: string;
+} {
+  const limitRaw = data.sample_size?.limit_per_category;
+  let limitPerCategory: number | undefined;
+  if (limitRaw !== undefined && limitRaw !== null) {
+    if (typeof limitRaw !== 'number' || !Number.isInteger(limitRaw) || limitRaw <= 0) {
+      return {
+        resolved: false,
+        error: `Invalid sample_size.limit_per_category '${String(limitRaw)}': expected positive integer or null.`,
+      };
+    }
+    limitPerCategory = limitRaw;
+  }
+
+  if (data.dataset_version === BUDGET_EVAL_DATASET_VERSION) {
+    if (data.split !== 'held_out' && data.split !== 'tuning') {
+      return {
+        resolved: false,
+        error: `Invalid split '${String(data.split)}' for dataset_version '${data.dataset_version}'.`,
+      };
+    }
+    const cases = getBudgetEvalCanonicalCases(data.split, limitPerCategory);
+    return { resolved: true, canonicalDataset: cases, expectedCount: cases.length };
+  }
+
+  if (data.dataset_version === TOOL_EVAL_DATASET_VERSION) {
+    if (data.split !== 'tool_selection_held_out') {
+      return {
+        resolved: false,
+        error: `Invalid split '${String(data.split)}' for dataset_version '${data.dataset_version}'.`,
+      };
+    }
+    const cases = getToolEvalCanonicalCases(limitPerCategory);
+    return {
+      resolved: true,
+      canonicalDataset: cases,
+      expectedCount: cases.selection_cases.length + cases.catch_scenarios.length,
+    };
+  }
+
+  return {
+    resolved: false,
+    error: `Unknown dataset_version '${String(data.dataset_version)}': cannot independently recompute canonical dataset hash.`,
+  };
+}
+
 export function validateBenchmarkResult(
   data: any,
-  options: { requirePassingAcceptance?: boolean } = { requirePassingAcceptance: true }
+  options: { requirePassingAcceptance?: boolean; datasetCases?: unknown } = { requirePassingAcceptance: true }
 ): BenchmarkValidationResult {
   const errors: string[] = [];
 
@@ -125,15 +249,45 @@ export function validateBenchmarkResult(
     errors.push('Missing model_config metadata.');
   }
 
-  // 3. Split, dataset version/hash, timestamp, valid sample count
+  // 3. Split, dataset version/hash + independent hash recomputation, timestamp, valid sample count
   if (!isNonEmptyString(data.split)) {
     errors.push('Missing benchmark split.');
   }
   if (!isNonEmptyString(data.dataset_version)) {
     errors.push('Missing dataset_version.');
   }
+  if (data.dataset_hash_algorithm !== DATASET_HASH_ALGORITHM) {
+    errors.push(
+      `Missing or invalid dataset_hash_algorithm '${String(data.dataset_hash_algorithm)}': expected '${DATASET_HASH_ALGORITHM}'.`
+    );
+  }
   if (!isNonEmptyString(data.dataset_hash) || !/^[a-f0-9]{64}$/i.test(data.dataset_hash)) {
     errors.push('Missing or invalid SHA-256 dataset_hash.');
+  } else if (options.datasetCases !== undefined) {
+    const expectedHash = computeDatasetHash(options.datasetCases);
+    if (data.dataset_hash.toLowerCase() !== expectedHash) {
+      errors.push(
+        `Dataset hash mismatch against supplied canonical cases: expected ${expectedHash}, got ${data.dataset_hash}.`
+      );
+    }
+  } else {
+    const resolution = resolveCanonicalDatasetForResult(data);
+    if (!resolution.resolved) {
+      errors.push(resolution.error!);
+    } else {
+      const expectedHash = computeDatasetHash(resolution.canonicalDataset);
+      if (data.dataset_hash.toLowerCase() !== expectedHash) {
+        errors.push(
+          `Dataset hash mismatch for dataset_version='${data.dataset_version}' split='${data.split}' limit_per_category=${String(data.sample_size?.limit_per_category ?? null)}: expected ${expectedHash}, got ${data.dataset_hash}.`
+        );
+      }
+      const recordedTotal = data.sample_size?.total_queries ?? data.sample_size?.total_cases;
+      if (typeof recordedTotal === 'number' && resolution.expectedCount !== undefined && recordedTotal !== resolution.expectedCount) {
+        errors.push(
+          `Sample count mismatch for canonical dataset (${recordedTotal} recorded vs ${resolution.expectedCount} expected).`
+        );
+      }
+    }
   }
   if (!isNonEmptyString(data.timestamp) || Number.isNaN(Date.parse(data.timestamp))) {
     errors.push(`Invalid or missing evaluation timestamp: '${String(data.timestamp)}'.`);
@@ -143,16 +297,51 @@ export function validateBenchmarkResult(
     errors.push(`Zero-valid-sample evaluations cannot be accepted (valid_samples=${String(validSamples)}).`);
   }
 
-  // 4. Cost accounting methodology
+  // 4. Cost accounting & pricing provenance
   const costMethod = data.cost_methodology as CostMethodology | undefined;
   if (
     !costMethod ||
     !['estimated_from_provider_usage_and_profile_rates', 'provider_billed'].includes(costMethod.billing_basis) ||
     typeof costMethod.provider_billed_cost_reported !== 'boolean' ||
     costMethod.usage_source !== 'provider_reported' ||
-    costMethod.currency !== 'USD'
+    costMethod.currency !== 'USD' ||
+    !isFiniteNonNeg(costMethod.input_cost_per_million) ||
+    !isFiniteNonNeg(costMethod.output_cost_per_million) ||
+    !isFiniteNonNeg(costMethod.reasoning_cost_per_million)
   ) {
     errors.push('Missing or invalid cost_methodology metadata.');
+  } else {
+    if (
+      costMethod.billing_basis === 'estimated_from_provider_usage_and_profile_rates' &&
+      (costMethod.provider_billed_cost_reported !== false ||
+        costMethod.cost_estimation_status !== 'estimated_only_not_provider_billed')
+    ) {
+      errors.push(
+        'Estimated rate-card cost must set provider_billed_cost_reported=false and cost_estimation_status="estimated_only_not_provider_billed".'
+      );
+    }
+    if (
+      costMethod.billing_basis === 'provider_billed' &&
+      (costMethod.provider_billed_cost_reported !== true ||
+        costMethod.cost_estimation_status !== 'provider_billed_verified')
+    ) {
+      errors.push(
+        'Provider-billed cost claims require provider_billed_cost_reported=true and cost_estimation_status="provider_billed_verified".'
+      );
+    }
+    if (!isNonEmptyString(costMethod.pricing_model) || costMethod.pricing_model !== data.model) {
+      errors.push(
+        `Missing or mismatched cost_methodology.pricing_model ('${String(costMethod.pricing_model)}' vs model '${String(data.model)}').`
+      );
+    }
+    if (!isNonEmptyString(costMethod.pricing_source)) {
+      errors.push('Missing cost_methodology.pricing_source.');
+    }
+    if (!isNonEmptyString(costMethod.pricing_last_updated) || !/^\d{4}-\d{2}-\d{2}$/.test(costMethod.pricing_last_updated)) {
+      errors.push(
+        `Missing or invalid cost_methodology.pricing_last_updated ('${String(costMethod.pricing_last_updated)}'; expected YYYY-MM-DD).`
+      );
+    }
   }
 
   // 5. Verifier results
