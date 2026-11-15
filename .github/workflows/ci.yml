@@ -29,16 +29,6 @@ jobs:
       - name: Run Vitest unit & engine tests
         run: npm test
 
-      - name: Run Tool-DC Evaluation Suite
-        env:
-          AEL_ALLOW_MOCK: '1'
-        run: npx tsx bin/ael.ts eval --suite tool
-
-      - name: Run AERA/CoBa Budget Evaluation Suite (Held-Out Split)
-        env:
-          AEL_ALLOW_MOCK: '1'
-        run: npx tsx bin/ael.ts eval --suite budget --split held_out
-
       - name: Build frontend distribution
         run: npm run build
 
@@ -62,16 +52,18 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run eval suites with threshold exit-code checks (a)
-        env:
-          AEL_ALLOW_MOCK: '1'
+      - name: Check live evaluation credential availability (never simulate)
         run: |
-          npx tsx bin/ael.ts eval --suite tool --db /tmp/verify_dod.db
-          npx tsx bin/ael.ts eval --suite budget --split held_out --db /tmp/verify_dod.db
+          echo "Live evaluation: SKIPPED / NOT RUN (CI standard workflow does not configure live provider API credentials; mock simulation is permanently removed)."
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            {
+              echo "### AEL Live Evaluation Status"
+              echo "- **Live Performance Benchmark**: **SKIPPED / NOT RUN** (no live provider credentials in standard CI; run \`.github/workflows/live-eval.yml\` with \`GEMINI_API_KEY\` for live benchmark evidence)."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Run V8 coverage report for engines gate (e)
         run: npm run test:coverage -- --coverage.reporter=text --coverage.reporter=json-summary
 
-      - name: Run verify-dod checks (a-e)
+      - name: Run verify-dod checks
         run: npm run verify:dod
-

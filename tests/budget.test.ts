@@ -1,48 +1,31 @@
 /**
  * Unit Tests: Thinking Budget Engine & Circuit Breaker
+ * Uses an isolated unit-test LLM double (never generates benchmark reports or performance evidence).
  * @license Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { BudgetEngine } from '../src/engines/budget.js';
 import { CircuitBreakerController } from '../src/engines/circuit_breaker.js';
 import { LLMClient } from '../src/llm/client.js';
 import { DecisionLogStore } from '../src/db/decision_log.js';
 import { DEFAULT_PRESETS } from '../src/config/ael_config.js';
+import { createUnitTestLLMClient } from './helpers/test_llm_double.js';
 
 describe('Budget Engine & Circuit Breaker', () => {
-  const originalAllowMock = process.env.AEL_ALLOW_MOCK;
   let logStore: DecisionLogStore;
   let llm: LLMClient;
   let circuitBreaker: CircuitBreakerController;
   let engine: BudgetEngine;
 
   beforeEach(() => {
-    process.env.AEL_ALLOW_MOCK = '1';
     logStore = new DecisionLogStore(':memory:');
-    llm = new LLMClient({
-      name: 'mock',
-      type: 'mock',
-      api_key_env: 'GEMINI_API_KEY',
-      default_model: 'mock',
-      cheap_model: 'mock',
-      reasoning_model: 'mock',
-      supports_reasoning_effort: true,
-      supports_logprobs: true,
-      input_cost_per_million: 0.1,
-      output_cost_per_million: 0.4,
-      reasoning_cost_per_million: 0.4,
-    });
+    llm = createUnitTestLLMClient({ supports_logprobs: true });
     circuitBreaker = new CircuitBreakerController(
       { enabled: true, rolling_window: 5, min_net_savings_usd: 0, max_error_rate: 0.2 },
       logStore
     );
     engine = new BudgetEngine(llm, logStore, circuitBreaker, DEFAULT_PRESETS.balanced);
-  });
-
-  afterEach(() => {
-    if (originalAllowMock === undefined) delete process.env.AEL_ALLOW_MOCK;
-    else process.env.AEL_ALLOW_MOCK = originalAllowMock;
   });
 
   it('allocates cheap compute for simple queries and reports actual-only consumption without counterfactual savings (P0-15)', async () => {
@@ -64,6 +47,8 @@ describe('Budget Engine & Circuit Breaker', () => {
     expect(res.net_tokens_saved).toBe(0);
     expect(res.net_cost_saved_usd).toBe(0);
     expect(res.total_tokens).toBeGreaterThan(0);
+    expect(res.input_tokens).toBeGreaterThan(0);
+    expect(res.output_tokens).toBeGreaterThan(0);
     expect(res.total_cost_usd).toBeGreaterThan(0);
     expect(res.ael_overhead_ms).toBeGreaterThanOrEqual(0);
   });
@@ -86,7 +71,6 @@ describe('Budget Engine & Circuit Breaker', () => {
   });
 
   it('trips circuit breaker when rolling net savings drop below zero', () => {
-    // Inject negative savings decisions into workflow 'loss_wf'
     for (let i = 0; i < 6; i++) {
       logStore.insertDecision({
         id: `loss_${i}`,
@@ -102,7 +86,7 @@ describe('Budget Engine & Circuit Breaker', () => {
         baseline_cost_usd: 0.0001,
         upstream_cost_usd: 0.0002,
         ael_internal_cost_usd: 0.0001,
-        net_cost_saved_usd: -0.0002, // Negative savings!
+        net_cost_saved_usd: -0.0002,
         completed_successfully: true,
       } as any);
     }
@@ -113,7 +97,6 @@ describe('Budget Engine & Circuit Breaker', () => {
   });
 
   it('computes unfloored savings only in comparative benchmark mode and trips breaker on token losses (P0-10 + P0-15)', async () => {
-    // 1. Comparative benchmark: baseline measured separately on identical sample
     const baseline = await llm.complete('What is 2 + 2?', { reasoning_effort: 'high' });
     const comparative = await engine.routeAndExecute('What is 2 + 2?', {
       task_category: 'factual',
@@ -123,7 +106,6 @@ describe('Budget Engine & Circuit Breaker', () => {
     expect(comparative.baseline_source).toBe('comparative_benchmark');
     expect(comparative.net_tokens_saved).toBeGreaterThan(0);
 
-    // 2. Passing small reference_baseline exposes unfloored negative net_tokens_saved in result & DecisionLogStore, tripping circuit breaker
     const wf = 'unfloored_token_loss_wf';
     for (let i = 0; i < 5; i++) {
       const r = await engine.routeAndExecute(`Solve differential equation #${i}`, {

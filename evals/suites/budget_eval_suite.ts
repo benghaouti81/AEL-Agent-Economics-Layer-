@@ -1,16 +1,14 @@
 /**
  * AEL Thinking Budget Evaluation Suite
  *
- * Expands to 50 held-out queries per category (200 total queries) across:
+ * Evaluates 50 held-out queries per category (200 total queries) across:
  * - factual / reasoning lookup (50) — verified via LLM judge verdict
  * - multi-step math/logic (50) — verified via numeric ground-truth match
- * - code synthesis/debugging (50) — verified via esbuild TS compilation + node:vm functional assertion check (NOT a security sandbox)
+ * - code synthesis/debugging (50) — verified via esbuild TS compilation + sanitized child process node:vm assertion check
  * - structured data extraction (50) — verified via JSON parsing + expected field match
  *
- * NOTE ON VALIDATION INTEGRITY:
- * When run without real API keys, this suite operates as a plumbing/smoke test
- * and is explicitly marked as NOT VALIDATED for acceptance criteria.
- * Real model benchmarking requires live API credentials (GEMINI_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY).
+ * Requires valid live provider credentials (GEMINI_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY).
+ * Never falls back to mock simulation.
  *
  * @license Apache-2.0
  */
@@ -24,10 +22,12 @@ import { DecisionLogStore } from '../../src/db/decision_log.js';
 import { CircuitBreakerController } from '../../src/engines/circuit_breaker.js';
 import { DEFAULT_PRESETS, ProviderProfile } from '../../src/config/ael_config.js';
 import {
+  LiveProviderType,
   MAX_LIVE_EVAL_COST_USD,
-  assertValidGeminiKey,
   assertWithinSpendingGuard,
+  buildLiveProviderProfile,
   estimateProjectedEvalCost,
+  resolveLiveProviderProfile,
 } from './spending_guard.js';
 import {
   VerificationMethod,
@@ -36,9 +36,20 @@ import {
   verifyMathNumericMatch,
   verifyReasoningJudgeVerdict,
 } from './budget_verifiers.js';
+import {
+  BENCHMARK_QUALITY_FLOORS,
+  BenchmarkSource,
+  CostMethodology,
+  ModelConfigurationSnapshot,
+  VerifierResultsSummary,
+  computeDatasetHash,
+} from './benchmark_validator.js';
+
+export const BUDGET_EVAL_DATASET_VERSION = 'ael-budget-v2.0-200q';
 
 export interface BudgetEvalOptions {
   live?: boolean;
+  provider?: LiveProviderType;
   maxCostUsd?: number;
   limit?: number;
   model?: string;
@@ -51,10 +62,10 @@ export interface CategoryMetric {
   baseline_tokens: number;
   actual_tokens: number;
   token_reduction_ratio: string;
-  token_reduction_pct: number;
+  token_reduction_pct: number | null;
   baseline_cost_usd: number;
   actual_cost_usd: number;
-  net_cost_saved_usd: number;
+  net_cost_saved_usd: number | null;
   /** Disclosed verifier/judge cost (USD), tracked strictly separately from baseline/actual product costs */
   verification_cost: number;
   baseline_correct: number;
@@ -69,35 +80,69 @@ export interface CategoryMetric {
 
 export interface BudgetEvalResult {
   suite_name: string;
+  source: BenchmarkSource;
   benchmark_type: 'comparative_benchmark_identical_samples';
   benchmark_methodology: string;
   split: 'held_out' | 'tuning';
+  dataset_version: string;
+  dataset_hash: string;
   timestamp: string;
   execution_date: string;
   run_command: string;
   live_api_credentials_present: boolean;
+  provider: LiveProviderType;
   provider_source: string;
   model: string;
+  credential_status: string;
+  model_config: ModelConfigurationSnapshot;
   sample_size: {
     total_queries: number;
+    valid_samples: number;
     per_category: Record<string, number>;
     limit_per_category: number | null;
     full_dataset_queries: number;
   };
+  token_usage: {
+    baseline_input_tokens: number;
+    baseline_output_tokens: number;
+    baseline_reasoning_tokens: number;
+    baseline_total_tokens: number;
+    ael_input_tokens: number;
+    ael_output_tokens: number;
+    ael_reasoning_tokens: number;
+    ael_total_tokens: number;
+    verifier_total_tokens: number;
+    usage_source: 'provider_reported';
+  };
+  verifier_results: VerifierResultsSummary;
+  accuracy_metrics: {
+    baseline_correct: number;
+    baseline_total: number;
+    baseline_accuracy: number;
+    ael_correct: number;
+    ael_total: number;
+    ael_accuracy: number;
+    accuracy_delta_pp: number;
+    accuracy_drop_pp: number;
+    quality_floor: number;
+  };
+  cost_methodology: CostMethodology;
+  savings_claims_valid: boolean;
   acceptance_status:
     | 'PASS'
-    | 'NOT VALIDATED (No live upstream API credentials configured)'
-    | 'NOT VALIDATED (Thresholds not reached)';
+    | 'FAIL (Accuracy below quality floor)'
+    | 'FAIL (Verifier errors encountered)'
+    | 'FAIL (Thresholds not reached)';
   total_queries: number;
   overall_baseline_tokens: number;
   overall_actual_tokens: number;
   overall_token_reduction_ratio: string;
-  overall_token_reduction_pct: number;
-  overall_net_savings_usd: number;
+  overall_token_reduction_pct: number | null;
+  overall_net_savings_usd: number | null;
   /** Disclosed total verifier/judge cost (USD), excluded from baseline/actual/net product savings */
   verification_cost: number;
-  usd_per_task_baseline: number;
-  usd_per_task_ael: number;
+  usd_per_task_baseline: number | null;
+  usd_per_task_ael: number | null;
   overall_baseline_correct: number;
   overall_baseline_accuracy_ratio: string;
   baseline_accuracy: number;
@@ -806,32 +851,8 @@ function getTestCasesForSplit(split: 'held_out' | 'tuning', limitPerCategory?: n
   return cap !== undefined ? tuning.slice(0, cap * categories.length) : tuning;
 }
 
-function getGeminiPricingForModel(model: string): { input: number; output: number; reasoning: number } {
-  if (/2\.5-pro/i.test(model)) {
-    return { input: 1.25, output: 10.0, reasoning: 10.0 };
-  }
-  if (/flash-lite/i.test(model)) {
-    return { input: 0.10, output: 0.40, reasoning: 0.40 };
-  }
-  return { input: 0.10, output: 0.40, reasoning: 0.40 };
-}
-
 export function buildLiveGeminiBudgetProfile(model?: string): ProviderProfile {
-  const resolvedModel = (model || process.env.AEL_LIVE_MODEL || 'gemini-2.5-flash').trim();
-  const pricing = getGeminiPricingForModel(resolvedModel);
-  return {
-    name: 'live_gemini',
-    type: 'gemini',
-    api_key_env: 'GEMINI_API_KEY',
-    default_model: resolvedModel,
-    cheap_model: 'gemini-2.5-flash-lite',
-    reasoning_model: 'gemini-2.5-pro',
-    supports_reasoning_effort: true,
-    supports_logprobs: false,
-    input_cost_per_million: pricing.input,
-    output_cost_per_million: pricing.output,
-    reasoning_cost_per_million: pricing.reasoning,
-  };
+  return buildLiveProviderProfile('gemini', model);
 }
 
 export function projectBudgetEvalCost(
@@ -840,7 +861,6 @@ export function projectBudgetEvalCost(
   limitPerCategory?: number
 ) {
   const testCases = getTestCasesForSplit(split, limitPerCategory);
-  // Accounts for baseline pass-through + AEL probe/escalation + factual LLM judge checks
   return estimateProjectedEvalCost({
     queries: testCases.map(t => t.query),
     promptOverheadCharsPerCall: 140,
@@ -855,23 +875,53 @@ async function verifyCaseOutput(
   tc: EvalQueryCase,
   responseText: string,
   llm: LLMClient
-): Promise<{ passed: boolean; method: VerificationMethod; extraCostUsd: number }> {
-  if (tc.category === 'math') {
-    const res = verifyMathNumericMatch(responseText, tc.expected_number!, tc.tolerance ?? 0.01);
-    return { passed: res.passed, method: res.method, extraCostUsd: 0 };
-  }
-  if (tc.category === 'code') {
-    const res = verifyCodeAssertionExecution(responseText, tc.function_name!, tc.assertion_script!);
-    return { passed: res.passed, method: res.method, extraCostUsd: 0 };
-  }
-  if (tc.category === 'extraction') {
-    const res = verifyExtractionJsonFields(responseText, tc.expected_json!);
-    return { passed: res.passed, method: res.method, extraCostUsd: 0 };
-  }
+): Promise<{ passed: boolean; errored: boolean; method: VerificationMethod; extraCostUsd: number; extraTokens: number }> {
+  try {
+    if (tc.category === 'math') {
+      const res = verifyMathNumericMatch(responseText, tc.expected_number!, tc.tolerance ?? 0.01);
+      return { passed: res.passed, errored: false, method: res.method, extraCostUsd: 0, extraTokens: 0 };
+    }
+    if (tc.category === 'code') {
+      const res = verifyCodeAssertionExecution(responseText, tc.function_name!, tc.assertion_script!);
+      return { passed: res.passed, errored: false, method: res.method, extraCostUsd: 0, extraTokens: 0 };
+    }
+    if (tc.category === 'extraction') {
+      const res = verifyExtractionJsonFields(responseText, tc.expected_json!);
+      return { passed: res.passed, errored: false, method: res.method, extraCostUsd: 0, extraTokens: 0 };
+    }
 
-  // factual / reasoning: explicit LLM judge verdict against reference answer
-  const judgeOut = await verifyReasoningJudgeVerdict(llm, tc.query, tc.expected_sub || '', responseText);
-  return { passed: judgeOut.result.passed, method: judgeOut.result.method, extraCostUsd: judgeOut.judgeCostUsd };
+    const judgeOut = await verifyReasoningJudgeVerdict(llm, tc.query, tc.expected_sub || '', responseText);
+    if (judgeOut.provider_source === 'unit_test' || (judgeOut.judgeTokens > 0 && judgeOut.usage_source !== 'provider_reported')) {
+      throw new Error(
+        `[AEL Benchmark Integrity Error] Judge verifier used non-live source (${judgeOut.provider_source}/${judgeOut.usage_source}).`
+      );
+    }
+    return {
+      passed: judgeOut.result.passed,
+      errored: false,
+      method: judgeOut.result.method,
+      extraCostUsd: judgeOut.judgeCostUsd,
+      extraTokens: judgeOut.judgeTokens,
+    };
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('Benchmark Integrity Error')) {
+      throw err;
+    }
+    return {
+      passed: false,
+      errored: true,
+      method:
+        tc.category === 'math'
+          ? 'numeric_match'
+          : tc.category === 'code'
+            ? 'code_execution'
+            : tc.category === 'extraction'
+              ? 'json_field_match'
+              : 'judge_verdict',
+      extraCostUsd: 0,
+      extraTokens: 0,
+    };
+  }
 }
 
 export async function runBudgetEvalSuite(
@@ -879,72 +929,17 @@ export async function runBudgetEvalSuite(
   split: 'held_out' | 'tuning' = 'held_out',
   options: BudgetEvalOptions = {}
 ): Promise<BudgetEvalResult> {
-  const liveMode = Boolean(options.live || process.env.AEL_LIVE_EVAL === '1');
+  // Always require explicit valid live provider credentials — never fall back to mock simulation
+  const { profile: provider, credentialStatus } = resolveLiveProviderProfile({
+    provider: options.provider,
+    model: options.model,
+  });
+
   const maxCostUsd = options.maxCostUsd ?? Number(process.env.AEL_MAX_EVAL_COST_USD || MAX_LIVE_EVAL_COST_USD);
-
-  let hasLiveApiKey = false;
-  let providerType: 'openai' | 'anthropic' | 'gemini' | 'mock' = 'mock';
-
-  if (liveMode) {
-    assertValidGeminiKey(process.env.GEMINI_API_KEY);
-    hasLiveApiKey = true;
-    providerType = 'gemini';
-  } else {
-    hasLiveApiKey = Boolean(
-      (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY' && process.env.GEMINI_API_KEY !== 'YOUR_API_KEY') ||
-      (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'MY_API_KEY' && process.env.OPENAI_API_KEY !== 'YOUR_API_KEY') ||
-      (process.env.ANTHROPIC_API_KEY && process.env.ANTHROPIC_API_KEY !== 'MY_API_KEY' && process.env.ANTHROPIC_API_KEY !== 'YOUR_API_KEY')
-    );
-
-    providerType = hasLiveApiKey
-      ? (process.env.OPENAI_API_KEY ? 'openai' : process.env.ANTHROPIC_API_KEY ? 'anthropic' : 'gemini')
-      : 'mock';
-  }
-
   const effectiveLimit = options.limit !== undefined && options.limit > 0 ? Math.floor(options.limit) : undefined;
-  const liveProfile = buildLiveGeminiBudgetProfile(options.model);
-  const provider: ProviderProfile = liveMode
-    ? liveProfile
-    : {
-        name: hasLiveApiKey ? `live_${providerType}` : 'smoke_mock',
-        type: providerType,
-        api_key_env: providerType === 'openai' ? 'OPENAI_API_KEY' : providerType === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'GEMINI_API_KEY',
-        default_model:
-          options.model ||
-          (providerType === 'openai'
-            ? 'gpt-4o-mini'
-            : providerType === 'anthropic'
-              ? 'claude-3-5-haiku-20241022'
-              : providerType === 'gemini'
-                ? 'gemini-2.5-flash'
-                : 'mock-model'),
-        cheap_model:
-          providerType === 'openai'
-            ? 'gpt-4o-mini'
-            : providerType === 'anthropic'
-              ? 'claude-3-5-haiku-20241022'
-              : providerType === 'gemini'
-                ? 'gemini-2.5-flash-lite'
-                : 'mock-model',
-        reasoning_model:
-          providerType === 'openai'
-            ? 'o3-mini'
-            : providerType === 'anthropic'
-              ? 'claude-3-7-sonnet-20250219'
-              : providerType === 'gemini'
-                ? 'gemini-2.5-pro'
-                : 'mock-model',
-        supports_reasoning_effort: true,
-        supports_logprobs: true,
-        input_cost_per_million: 0.15,
-        output_cost_per_million: 0.60,
-        reasoning_cost_per_million: 0.60,
-      };
 
   const projected = projectBudgetEvalCost(split, provider, effectiveLimit);
-  if (liveMode || options.maxCostUsd !== undefined) {
-    assertWithinSpendingGuard(projected.projectedCostUsd, maxCostUsd, `budget_eval_suite(${split}):preflight`);
-  }
+  assertWithinSpendingGuard(projected.projectedCostUsd, maxCostUsd, `budget_eval_suite(${split}):preflight`);
 
   const llm = new LLMClient(provider);
   const circuitBreaker = new CircuitBreakerController(
@@ -955,6 +950,9 @@ export async function runBudgetEvalSuite(
 
   const fullSplitCount = getTestCasesForSplit(split).length;
   const testCases = getTestCasesForSplit(split, effectiveLimit);
+  if (testCases.length === 0) {
+    throw new Error(`[AEL Benchmark Error] Split '${split}' produced 0 test cases.`);
+  }
 
   const catMethods: Record<'factual' | 'math' | 'code' | 'extraction', VerificationMethod> = {
     factual: 'judge_verdict',
@@ -984,13 +982,33 @@ export async function runBudgetEvalSuite(
   };
 
   let cumulativeCostUsd = 0;
+  let baselineInputTokens = 0;
+  let baselineOutputTokens = 0;
+  let baselineReasoningTokens = 0;
+  let aelInputTokens = 0;
+  let aelOutputTokens = 0;
+  let aelReasoningTokens = 0;
+  let verifierTotalTokens = 0;
+  let totalVerifications = 0;
+  let passedVerifications = 0;
+  let failedVerifications = 0;
+  let erroredVerifications = 0;
+  const methodsUsed = new Set<string>();
 
   for (const tc of testCases) {
     const categoryKey = tc.category;
 
     // 1. Measure real baseline output (fixed high reasoning effort, no adaptive AEL routing)
     const baselineRes = await llm.complete(tc.query, { reasoning_effort: 'high' });
+    if (baselineRes.provider_source === 'unit_test' || baselineRes.usage_source !== 'provider_reported') {
+      throw new Error(
+        `[AEL Benchmark Integrity Error] Unit-test double detected in baseline call (${baselineRes.provider_source}/${baselineRes.usage_source}).`
+      );
+    }
     cumulativeCostUsd += baselineRes.cost_usd;
+    baselineInputTokens += baselineRes.input_tokens;
+    baselineOutputTokens += baselineRes.output_tokens;
+    baselineReasoningTokens += baselineRes.reasoning_tokens;
 
     // 2. Measure AEL routed output against measured reference baseline
     const res = await engine.routeAndExecute(tc.query, {
@@ -1002,24 +1020,40 @@ export async function runBudgetEvalSuite(
         cost_usd: baselineRes.cost_usd,
       },
     });
+    if (res.provider_source === 'unit_test' || res.usage_source !== 'provider_reported') {
+      throw new Error(
+        `[AEL Benchmark Integrity Error] Unit-test double detected in AEL call (${res.provider_source}/${res.usage_source}).`
+      );
+    }
     cumulativeCostUsd += res.total_cost_usd;
+    aelInputTokens += res.input_tokens;
+    aelOutputTokens += res.output_tokens;
+    aelReasoningTokens += res.reasoning_tokens;
 
     // 3. Apply identical real per-category verifier to both baseline and AEL responses
     const baseCheck = await verifyCaseOutput(tc, baselineRes.text, llm);
     const aelCheck = await verifyCaseOutput(tc, res.text, llm);
+    methodsUsed.add(baseCheck.method);
+    methodsUsed.add(aelCheck.method);
+    verifierTotalTokens += baseCheck.extraTokens + aelCheck.extraTokens;
+
+    for (const chk of [baseCheck, aelCheck]) {
+      totalVerifications++;
+      if (chk.errored) erroredVerifications++;
+      else if (chk.passed) passedVerifications++;
+      else failedVerifications++;
+    }
+
     const verificationCostUsd = baseCheck.extraCostUsd + aelCheck.extraCostUsd;
     cumulativeCostUsd += verificationCostUsd;
 
-    if (liveMode || options.maxCostUsd !== undefined) {
-      assertWithinSpendingGuard(cumulativeCostUsd, maxCostUsd, `budget_eval_suite(${split}):runtime`);
-    }
+    assertWithinSpendingGuard(cumulativeCostUsd, maxCostUsd, `budget_eval_suite(${split}):runtime`);
 
     const stat = catStats[categoryKey];
     if (stat) {
       stat.total++;
       stat.baselineTok += res.baseline_tokens;
       stat.actualTok += res.total_tokens;
-      // Product costs only (verifier/judge costs are tracked separately in verificationCost)
       stat.baseCost += res.baseline_cost_usd;
       stat.actCost += res.total_cost_usd;
       stat.verificationCost += verificationCostUsd;
@@ -1029,7 +1063,6 @@ export async function runBudgetEvalSuite(
     }
   }
 
-  const categoryResults: Record<string, CategoryMetric> = {};
   let totalBaseTok = 0;
   let totalActTok = 0;
   let totalBaseCost = 0;
@@ -1039,9 +1072,55 @@ export async function runBudgetEvalSuite(
   let totalCorrect = 0;
   let allOverheads: number[] = [];
 
+  for (const stat of Object.values(catStats)) {
+    if (stat.total === 0) continue;
+    totalBaseTok += stat.baselineTok;
+    totalActTok += stat.actualTok;
+    totalBaseCost += stat.baseCost;
+    totalActCost += stat.actCost;
+    totalVerificationCost += stat.verificationCost;
+    totalBaseCorrect += stat.baseCorrect;
+    totalCorrect += stat.correct;
+    allOverheads = allOverheads.concat(stat.overheads);
+  }
+
+  allOverheads.sort((a, b) => a - b);
+  const overallP95 = allOverheads[Math.floor(allOverheads.length * 0.95)] ?? 0;
+  const rawTokenReduct = totalBaseTok > 0 ? ((totalBaseTok - totalActTok) / totalBaseTok) * 100 : 0;
+  const rawNetSavings = Number((totalBaseCost - totalActCost).toFixed(5));
+  const overallVerificationCost = Number(totalVerificationCost.toFixed(6));
+  const rawUsdPerTaskBaseline = Number((totalBaseCost / testCases.length).toFixed(5));
+  const rawUsdPerTaskAel = Number((totalActCost / testCases.length).toFixed(5));
+  const overallAcc = Number((totalCorrect / testCases.length).toFixed(4));
+  const baselineOverallAcc = Number((totalBaseCorrect / testCases.length).toFixed(4));
+  const accuracyDeltaPp = Number(((overallAcc - baselineOverallAcc) * 100).toFixed(1));
+  const accuracyDropPp = Number(((baselineOverallAcc - overallAcc) * 100).toFixed(1));
+
+  const accuracyAboveFloor =
+    baselineOverallAcc >= BENCHMARK_QUALITY_FLOORS.budget_min_baseline_accuracy &&
+    overallAcc >= BENCHMARK_QUALITY_FLOORS.budget_min_ael_accuracy;
+  const verifiersHealthy = erroredVerifications === 0 && totalVerifications > 0;
+  const thresholdsMet =
+    rawTokenReduct >= BENCHMARK_QUALITY_FLOORS.budget_min_token_reduction_pct &&
+    accuracyDropPp <= BENCHMARK_QUALITY_FLOORS.budget_max_accuracy_drop_pp &&
+    overallP95 < BENCHMARK_QUALITY_FLOORS.budget_max_p95_overhead_ms &&
+    totalBaseTok > 0 &&
+    totalActTok > 0;
+
+  const passedAcceptance = verifiersHealthy && accuracyAboveFloor && thresholdsMet;
+  const acceptanceStatus: BudgetEvalResult['acceptance_status'] = !verifiersHealthy
+    ? 'FAIL (Verifier errors encountered)'
+    : !accuracyAboveFloor
+      ? 'FAIL (Accuracy below quality floor)'
+      : thresholdsMet
+        ? 'PASS'
+        : 'FAIL (Thresholds not reached)';
+
+  // Build per-category results; suppress savings claims if evaluation failed
+  const categoryResults: Record<string, CategoryMetric> = {};
   for (const [cat, stat] of Object.entries(catStats)) {
     if (stat.total === 0) continue;
-    const tokenReduct = ((stat.baselineTok - stat.actualTok) / stat.baselineTok) * 100;
+    const tokenReduct = stat.baselineTok > 0 ? ((stat.baselineTok - stat.actualTok) / stat.baselineTok) * 100 : 0;
     const netSavedUsd = Number((stat.baseCost - stat.actCost).toFixed(5));
     const acc = Number((stat.correct / stat.total).toFixed(4));
     const baselineAcc = Number((stat.baseCorrect / stat.total).toFixed(4));
@@ -1056,11 +1135,13 @@ export async function runBudgetEvalSuite(
       total_samples: stat.total,
       baseline_tokens: stat.baselineTok,
       actual_tokens: stat.actualTok,
-      token_reduction_ratio: `${stat.baselineTok - stat.actualTok}/${stat.baselineTok}`,
-      token_reduction_pct: Number(tokenReduct.toFixed(1)),
+      token_reduction_ratio: passedAcceptance
+        ? `${stat.baselineTok - stat.actualTok}/${stat.baselineTok}`
+        : 'NOT_CLAIMED (evaluation failed)',
+      token_reduction_pct: passedAcceptance ? Number(tokenReduct.toFixed(1)) : null,
       baseline_cost_usd: Number(stat.baseCost.toFixed(5)),
       actual_cost_usd: Number(stat.actCost.toFixed(5)),
-      net_cost_saved_usd: netSavedUsd,
+      net_cost_saved_usd: passedAcceptance ? netSavedUsd : null,
       verification_cost: Number(stat.verificationCost.toFixed(6)),
       baseline_correct: stat.baseCorrect,
       baseline_accuracy_ratio: `${stat.baseCorrect}/${stat.total}`,
@@ -1071,72 +1152,106 @@ export async function runBudgetEvalSuite(
       accuracy_delta_pp: accDelta,
       p95_overhead_ms: p95,
     };
-
-    totalBaseTok += stat.baselineTok;
-    totalActTok += stat.actualTok;
-    totalBaseCost += stat.baseCost;
-    totalActCost += stat.actCost;
-    totalVerificationCost += stat.verificationCost;
-    totalBaseCorrect += stat.baseCorrect;
-    totalCorrect += stat.correct;
-    allOverheads = allOverheads.concat(stat.overheads);
   }
-
-  allOverheads.sort((a, b) => a - b);
-  const overallP95 = allOverheads[Math.floor(allOverheads.length * 0.95)] ?? 0;
-  const overallTokenReduct = ((totalBaseTok - totalActTok) / totalBaseTok) * 100;
-  const overallNetSavings = Number((totalBaseCost - totalActCost).toFixed(5));
-  const overallVerificationCost = Number(totalVerificationCost.toFixed(6));
-  const usdPerTaskBaseline = Number((totalBaseCost / testCases.length).toFixed(5));
-  const usdPerTaskAel = Number((totalActCost / testCases.length).toFixed(5));
-  const overallAcc = Number((totalCorrect / testCases.length).toFixed(4));
-  const baselineOverallAcc = Number((totalBaseCorrect / testCases.length).toFixed(4));
-  const accuracyDropPp = Math.max(0, Number(((baselineOverallAcc - overallAcc) * 100).toFixed(1)));
-
-  const acceptanceStatus = hasLiveApiKey
-    ? (overallTokenReduct >= 50.0 && accuracyDropPp <= 2.0 ? 'PASS' : 'NOT VALIDATED (Thresholds not reached)')
-    : 'NOT VALIDATED (No live upstream API credentials configured)';
 
   const now = new Date();
   const dateStr = now.toISOString().split('T')[0];
 
-  const cmdParts = [`npx tsx bin/ael.ts eval --suite budget --split ${split}`];
-  if (liveMode) cmdParts.push('--live');
+  const cmdParts = [`npx tsx bin/ael.ts eval --suite budget --split ${split} --provider ${provider.type}`];
   if (options.model) cmdParts.push(`--model ${options.model}`);
   if (effectiveLimit !== undefined) cmdParts.push(`--limit ${effectiveLimit}`);
 
   const perCategorySampleCounts = Object.fromEntries(
     Object.entries(categoryResults).map(([cat, m]) => [cat, m.total_samples])
   );
+  const datasetHash = computeDatasetHash(testCases);
 
   const result: BudgetEvalResult = {
     suite_name: `AERA/CoBa Thinking Budget Comparative Benchmark (${split.toUpperCase()})`,
+    source: 'live_provider',
     benchmark_type: 'comparative_benchmark_identical_samples',
     benchmark_methodology:
       'Separate comparative benchmark running fixed high-effort baseline vs AEL BudgetEngine on identical samples; live per-request proxy accounting reports actual consumption only.',
     split,
+    dataset_version: BUDGET_EVAL_DATASET_VERSION,
+    dataset_hash: datasetHash,
     timestamp: now.toISOString(),
     execution_date: dateStr,
     run_command: cmdParts.join(' '),
-    live_api_credentials_present: hasLiveApiKey,
-    provider_source: hasLiveApiKey ? providerType : 'mock_simulator',
+    live_api_credentials_present: true,
+    provider: provider.type as LiveProviderType,
+    provider_source: provider.type,
     model: provider.default_model,
+    credential_status: credentialStatus,
+    model_config: {
+      default_model: provider.default_model,
+      cheap_model: provider.cheap_model,
+      reasoning_model: provider.reasoning_model,
+      supports_reasoning_effort: provider.supports_reasoning_effort,
+      supports_logprobs: provider.supports_logprobs,
+      preset: DEFAULT_PRESETS.balanced.name,
+      effort_ladder: DEFAULT_PRESETS.balanced.effort_ladder,
+    },
     sample_size: {
       total_queries: testCases.length,
+      valid_samples: testCases.length - Math.ceil(erroredVerifications / 2),
       per_category: perCategorySampleCounts,
       limit_per_category: effectiveLimit ?? null,
       full_dataset_queries: fullSplitCount,
     },
+    token_usage: {
+      baseline_input_tokens: baselineInputTokens,
+      baseline_output_tokens: baselineOutputTokens,
+      baseline_reasoning_tokens: baselineReasoningTokens,
+      baseline_total_tokens: totalBaseTok,
+      ael_input_tokens: aelInputTokens,
+      ael_output_tokens: aelOutputTokens,
+      ael_reasoning_tokens: aelReasoningTokens,
+      ael_total_tokens: totalActTok,
+      verifier_total_tokens: verifierTotalTokens,
+      usage_source: 'provider_reported',
+    },
+    verifier_results: {
+      total_verifications: totalVerifications,
+      passed: passedVerifications,
+      failed: failedVerifications,
+      errored: erroredVerifications,
+      methods: Array.from(methodsUsed),
+    },
+    accuracy_metrics: {
+      baseline_correct: totalBaseCorrect,
+      baseline_total: testCases.length,
+      baseline_accuracy: baselineOverallAcc,
+      ael_correct: totalCorrect,
+      ael_total: testCases.length,
+      ael_accuracy: overallAcc,
+      accuracy_delta_pp: accuracyDeltaPp,
+      accuracy_drop_pp: accuracyDropPp,
+      quality_floor: BENCHMARK_QUALITY_FLOORS.budget_min_ael_accuracy,
+    },
+    cost_methodology: {
+      billing_basis: 'estimated_from_provider_usage_and_profile_rates',
+      provider_billed_cost_reported: false,
+      usage_source: 'provider_reported',
+      currency: 'USD',
+      input_cost_per_million: provider.input_cost_per_million,
+      output_cost_per_million: provider.output_cost_per_million,
+      reasoning_cost_per_million: provider.reasoning_cost_per_million,
+      verification_cost_excluded_from_product_savings: true,
+    },
+    savings_claims_valid: passedAcceptance,
     acceptance_status: acceptanceStatus,
     total_queries: testCases.length,
     overall_baseline_tokens: totalBaseTok,
     overall_actual_tokens: totalActTok,
-    overall_token_reduction_ratio: `${totalBaseTok - totalActTok}/${totalBaseTok}`,
-    overall_token_reduction_pct: Number(overallTokenReduct.toFixed(1)),
-    overall_net_savings_usd: overallNetSavings,
+    overall_token_reduction_ratio: passedAcceptance
+      ? `${totalBaseTok - totalActTok}/${totalBaseTok}`
+      : 'NOT_CLAIMED (evaluation failed)',
+    overall_token_reduction_pct: passedAcceptance ? Number(rawTokenReduct.toFixed(1)) : null,
+    overall_net_savings_usd: passedAcceptance ? rawNetSavings : null,
     verification_cost: overallVerificationCost,
-    usd_per_task_baseline: usdPerTaskBaseline,
-    usd_per_task_ael: usdPerTaskAel,
+    usd_per_task_baseline: passedAcceptance ? rawUsdPerTaskBaseline : null,
+    usd_per_task_ael: passedAcceptance ? rawUsdPerTaskAel : null,
     overall_baseline_correct: totalBaseCorrect,
     overall_baseline_accuracy_ratio: `${totalBaseCorrect}/${testCases.length}`,
     baseline_accuracy: baselineOverallAcc,
@@ -1148,13 +1263,13 @@ export async function runBudgetEvalSuite(
     categories: categoryResults,
   };
 
-  // Persist evidence JSON to evals/results/
+  // Persist live evidence JSON to evals/results/
   const suiteDir = path.dirname(fileURLToPath(import.meta.url));
   const resultsDir = path.resolve(suiteDir, '..', 'results');
   if (!fs.existsSync(resultsDir)) {
     fs.mkdirSync(resultsDir, { recursive: true });
   }
-  const fileName = liveMode ? `${dateStr}_live_budget_${split}.json` : `${dateStr}_budget_${split}.json`;
+  const fileName = `${dateStr}_live_budget_${split}.json`;
   const evidenceFile = path.join(resultsDir, fileName);
   fs.writeFileSync(evidenceFile, JSON.stringify(result, null, 2), 'utf8');
 

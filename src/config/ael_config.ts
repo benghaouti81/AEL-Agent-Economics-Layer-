@@ -11,7 +11,7 @@ import { ScalingRegimeSchema } from '../models/contracts.js';
 
 export const ProviderProfileSchema = z.object({
   name: z.string(),
-  type: z.enum(['openai', 'anthropic', 'gemini', 'mock']),
+  type: z.enum(['openai', 'anthropic', 'gemini']),
   base_url: z.string().optional(),
   api_key_env: z.string().default('GEMINI_API_KEY'),
   default_model: z.string(),

@@ -3,7 +3,7 @@
  * @license Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import * as esbuild from 'esbuild';
 import {
   verifyCodeAssertionExecution,
@@ -12,19 +12,11 @@ import {
   verifyReasoningJudgeVerdict,
 } from '../evals/suites/budget_verifiers.js';
 import { DISTINCT_BUDGET_QUERIES } from '../evals/suites/budget_eval_suite.js';
-import { LLMClient } from '../src/llm/client.js';
+import { createUnitTestLLMClient } from './helpers/test_llm_double.js';
 
 describe('Budget Eval Per-Category Real Verifiers (P0-9)', () => {
-  const originalAllowMock = process.env.AEL_ALLOW_MOCK;
-
-  beforeEach(() => {
-    process.env.AEL_ALLOW_MOCK = '1';
-  });
-
   afterEach(() => {
     vi.restoreAllMocks();
-    if (originalAllowMock === undefined) delete process.env.AEL_ALLOW_MOCK;
-    else process.env.AEL_ALLOW_MOCK = originalAllowMock;
   });
 
   it('verifies math responses via final numeric answer only and rejects intermediate-number matches or mock boilerplate (P0-14)', () => {
@@ -120,27 +112,22 @@ describe('Budget Eval Per-Category Real Verifiers (P0-9)', () => {
     expect(verifyExtractionJsonFields('Processed response for query. Verified output.', expected).passed).toBe(false);
   });
 
-  it('verifies reasoning/factual responses via LLM judge verdict and never trusts mock boilerplate', async () => {
-    const mockLlm = new LLMClient({
-      name: 'mock',
-      type: 'mock',
-      api_key_env: 'GEMINI_API_KEY',
-      default_model: 'mock',
-      cheap_model: 'mock',
-      reasoning_model: 'mock',
-      supports_reasoning_effort: true,
-      supports_logprobs: false,
-      input_cost_per_million: 0.1,
-      output_cost_per_million: 0.4,
-      reasoning_cost_per_million: 0.4,
-    });
+  it('verifies reasoning/factual responses via LLM judge verdict and rejects non-verdict boilerplate', async () => {
+    const testDoubleLlm = createUnitTestLLMClient();
 
-    // Under mock_simulator, VERIFY returns { verified: true } without { correct: true } -> must NOT count as passed
-    const mockJudgeOut = await verifyReasoningJudgeVerdict(mockLlm, 'What year?', '1969', 'Processed response for query. Verified output.');
-    expect(mockJudgeOut.result.passed).toBe(false);
+    // Generic test-double text without {"correct": true} -> must NOT count as passed
+    const genericJudgeOut = await verifyReasoningJudgeVerdict(
+      testDoubleLlm,
+      'What year?',
+      '1969',
+      'Processed response for query. Verified output.'
+    );
+    expect(genericJudgeOut.result.passed).toBe(false);
+    expect(genericJudgeOut.provider_source).toBe('unit_test');
+    expect(genericJudgeOut.usage_source).toBe('unit_test');
 
-    // With real judge JSON verdict {"correct": true}
-    vi.spyOn(mockLlm, 'complete').mockResolvedValueOnce({
+    // With explicit judge JSON verdict {"correct": true}
+    vi.spyOn(testDoubleLlm, 'complete').mockResolvedValueOnce({
       text: '{"correct": true}',
       input_tokens: 20,
       output_tokens: 5,
@@ -148,11 +135,12 @@ describe('Budget Eval Per-Category Real Verifiers (P0-9)', () => {
       total_tokens: 25,
       cost_usd: 0.00001,
       latency_ms: 10,
-      model: 'mock',
+      model: 'unit-test-double',
       confidence_source: 'unavailable',
-      provider_source: 'gemini',
+      provider_source: 'unit_test',
+      usage_source: 'unit_test',
     });
-    const passJudgeOut = await verifyReasoningJudgeVerdict(mockLlm, 'What year?', '1969', 'Apollo 11 landed in 1969.');
+    const passJudgeOut = await verifyReasoningJudgeVerdict(testDoubleLlm, 'What year?', '1969', 'Apollo 11 landed in 1969.');
     expect(passJudgeOut.result.passed).toBe(true);
   });
 });

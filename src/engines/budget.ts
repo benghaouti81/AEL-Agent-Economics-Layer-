@@ -21,6 +21,9 @@ export interface BudgetRoutingResult {
   escalation_levels: number;
   confidence_signal: ConfidenceLevel;
   samples_generated: number;
+  input_tokens: number;
+  output_tokens: number;
+  reasoning_tokens: number;
   total_tokens: number;
   upstream_tokens: number;
   ael_internal_tokens: number;
@@ -34,6 +37,9 @@ export interface BudgetRoutingResult {
   ael_overhead_ms: number;
   circuit_breaker_tripped: boolean;
   pass_through: boolean;
+  provider_source: LLMResponse['provider_source'];
+  model: string;
+  usage_source: LLMResponse['usage_source'];
 }
 
 export class BudgetEngine {
@@ -95,6 +101,9 @@ export class BudgetEngine {
     let aelInternalCost = 0;
     let upstreamTokens = 0;
     let upstreamCost = 0;
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
+    let totalReasoningTokens = 0;
 
     // STEP 1: CHEAP FIRST PROBE (Lowest inference budget)
     const initialEffort = policy.initial_reasoning_effort;
@@ -102,6 +111,9 @@ export class BudgetEngine {
 
     upstreamTokens += probeResponse.total_tokens;
     upstreamCost += probeResponse.cost_usd;
+    totalInputTokens += probeResponse.input_tokens;
+    totalOutputTokens += probeResponse.output_tokens;
+    totalReasoningTokens += probeResponse.reasoning_tokens;
 
     // Initialize cumulative AEL decision overhead time (ms)
     let aelOverheadMs = 0;
@@ -130,6 +142,9 @@ export class BudgetEngine {
         samplesCount++;
         upstreamTokens += sampleRes.total_tokens;
         upstreamCost += sampleRes.cost_usd;
+        totalInputTokens += sampleRes.input_tokens;
+        totalOutputTokens += sampleRes.output_tokens;
+        totalReasoningTokens += sampleRes.reasoning_tokens;
         candidateAnswers.push(sampleRes.text);
       }
 
@@ -181,6 +196,9 @@ export class BudgetEngine {
       const judgePostStart = performance.now();
       aelInternalTokens += judgeRes.total_tokens;
       aelInternalCost += judgeRes.cost_usd;
+      totalInputTokens += judgeRes.input_tokens;
+      totalOutputTokens += judgeRes.output_tokens;
+      totalReasoningTokens += judgeRes.reasoning_tokens;
 
       finalResponse = judgeRes;
       confidenceSignal = 'llm_judge_verdict'; // Evaluated and resolved by LLM judge step (distinct from provider logprobs)
@@ -244,6 +262,9 @@ export class BudgetEngine {
       escalation_levels: escalationLevels,
       confidence_signal: confidenceSignal,
       samples_generated: samplesCount,
+      input_tokens: totalInputTokens,
+      output_tokens: totalOutputTokens,
+      reasoning_tokens: totalReasoningTokens,
       total_tokens: actualTotalTokens,
       upstream_tokens: upstreamTokens,
       ael_internal_tokens: aelInternalTokens,
@@ -257,6 +278,9 @@ export class BudgetEngine {
       ael_overhead_ms: finalAelOverheadMs,
       circuit_breaker_tripped: breakerStatus.tripped,
       pass_through: false,
+      provider_source: finalResponse.provider_source,
+      model: finalResponse.model,
+      usage_source: finalResponse.usage_source,
     };
   }
 
@@ -348,6 +372,9 @@ export class BudgetEngine {
       escalation_levels: 0,
       confidence_signal: 'insufficient_evidence',
       samples_generated: 1,
+      input_tokens: response.input_tokens,
+      output_tokens: response.output_tokens,
+      reasoning_tokens: response.reasoning_tokens,
       total_tokens: response.total_tokens,
       upstream_tokens: response.total_tokens,
       ael_internal_tokens: 0,
@@ -361,6 +388,9 @@ export class BudgetEngine {
       ael_overhead_ms: 1,
       circuit_breaker_tripped: circuitBreakerTripped,
       pass_through: true,
+      provider_source: response.provider_source,
+      model: response.model,
+      usage_source: response.usage_source,
     };
   }
 }

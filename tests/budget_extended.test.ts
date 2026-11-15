@@ -1,5 +1,6 @@
 /**
  * Extended Unit Tests: Thinking Budget Engine & Scaling Regimes
+ * Uses an isolated unit-test LLM double (never generates benchmark reports or performance evidence).
  * @license Apache-2.0
  */
 
@@ -9,6 +10,7 @@ import { CircuitBreakerController } from '../src/engines/circuit_breaker.js';
 import { LLMClient } from '../src/llm/client.js';
 import { DecisionLogStore } from '../src/db/decision_log.js';
 import { DEFAULT_PRESETS } from '../src/config/ael_config.js';
+import { createUnitTestLLMClient } from './helpers/test_llm_double.js';
 
 describe('BudgetEngine Scaling Regimes & Escalation', () => {
   let logStore: DecisionLogStore;
@@ -17,21 +19,8 @@ describe('BudgetEngine Scaling Regimes & Escalation', () => {
   let engine: BudgetEngine;
 
   beforeEach(() => {
-    process.env.AEL_ALLOW_MOCK = '1';
     logStore = new DecisionLogStore(':memory:');
-    llm = new LLMClient({
-      name: 'mock',
-      type: 'mock',
-      api_key_env: 'KEY',
-      default_model: 'mock',
-      cheap_model: 'mock',
-      reasoning_model: 'mock',
-      supports_reasoning_effort: true,
-      supports_logprobs: true,
-      input_cost_per_million: 0.1,
-      output_cost_per_million: 0.4,
-      reasoning_cost_per_million: 0.4,
-    });
+    llm = createUnitTestLLMClient({ supports_logprobs: true });
     circuitBreaker = new CircuitBreakerController(
       { enabled: true, rolling_window: 20, min_net_savings_usd: 0, max_error_rate: 0.2 },
       logStore

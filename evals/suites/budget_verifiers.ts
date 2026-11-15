@@ -287,7 +287,13 @@ export async function verifyReasoningJudgeVerdict(
   query: string,
   referenceAnswer: string,
   candidateResponse: string
-): Promise<{ result: VerificationResult; judgeCostUsd: number; judgeTokens: number }> {
+): Promise<{
+  result: VerificationResult;
+  judgeCostUsd: number;
+  judgeTokens: number;
+  provider_source?: string;
+  usage_source?: string;
+}> {
   if (!candidateResponse || !candidateResponse.trim()) {
     return {
       result: { passed: false, method: 'judge_verdict', detail: 'Empty response' },
@@ -312,7 +318,6 @@ export async function verifyReasoningJudgeVerdict(
     const jsonMatch = judgeRes.text.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
       const parsed = JSON.parse(jsonMatch[0]);
-      // Strict boolean check: mock_simulator emits { verified: true } without { correct: true }, so mock does not forge factual accuracy.
       correct = parsed.correct === true;
     }
   } catch {
@@ -329,5 +334,7 @@ export async function verifyReasoningJudgeVerdict(
     },
     judgeCostUsd: judgeRes.cost_usd,
     judgeTokens: judgeRes.total_tokens,
+    provider_source: judgeRes.provider_source,
+    usage_source: judgeRes.usage_source,
   };
 }

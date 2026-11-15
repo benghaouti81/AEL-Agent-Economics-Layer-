@@ -3,8 +3,6 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Node: 22 LTS](https://img.shields.io/badge/node-22%20LTS-green.svg)](https://nodejs.org/)
 [![TypeScript: 5.x](https://img.shields.io/badge/typescript-5.x%20strict-blue.svg)](https://www.typescriptlang.org/)
-[![Tests: 34 passed](https://img.shields.io/badge/tests-34%20passed-brightgreen.svg)](tests/)
-[![Coverage: 86.9% engines](https://img.shields.io/badge/coverage-86.9%25%20engines-brightgreen.svg)](tests/)
 
 **AEL (Agent Economics Layer)** is a self-hosted economic middleware written in TypeScript that sits between an AI agent framework (LangChain, LlamaIndex, Claude Code, Cursor) and upstream resources (LLM APIs + MCP tool servers).
 
@@ -18,61 +16,40 @@ Both engines write to a unified, file-backed **SQLite Decision Log (`better-sqli
 
 ## Definition of Done (Acceptance Criteria Status)
 
-| DoD Item | Requirement | Measured Evidence & Traceability | Acceptance Status |
+> [!NOTE]
+> AEL does not include any synthetic or simulated LLM evaluation mode. Live benchmark criteria (**#1–#5**) remain **NOT RUN** until executed against real upstream provider credentials (`GEMINI_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY`) and validated by `evals/suites/benchmark_validator.ts`.
+
+| DoD Item | Requirement | Evidence & Traceability | Acceptance Status |
 | :---: | :--- | :--- | :---: |
-| **#1** | $\ge 90\%$ tool-selection accuracy ($\le 3$ retries) on real model API | `evals/results/2026-11-15_tool_selection.json` (`provider_source: mock_simulator`)<br>Command: `AEL_ALLOW_MOCK=1 npx tsx bin/ael.ts eval --suite tool`<br>Offline smoke result: **90.0% accuracy (9/10)**, avg **0** retries across 10 selection cases (13 total cases = 10 selection + 3 dry-run catch) | **NOT VALIDATED**<br>*(Smoke run via `mock_simulator`; live model eval pending)* |
-| **#2** | $\ge 3$ dry-run safety catches of wrong tools | `evals/results/2026-11-15_tool_selection.json` (`provider_source: mock_simulator`)<br>Offline smoke result: **3/3 catches** (missing file, unauthorized SQL, empty query) | **NOT VALIDATED**<br>*(Smoke run via `mock_simulator`; live model eval pending)* |
-| **#3** | $\ge 50\%$ reasoning token reduction ($\le 2\text{pp}$ accuracy drop) on real model API | `evals/results/2026-11-15_budget_held_out.json` (`provider_source: mock_simulator`)<br>Command: `AEL_ALLOW_MOCK=1 npx tsx bin/ael.ts eval --suite budget --split held_out`<br>Offline smoke result: **54.8% token reduction (`70382/128522`)**, Base `0/200` $\to$ AEL `0/200` under real verifiers; no live API key in environment | **NOT VALIDATED**<br>*(Requires live API credentials)* |
-| **#4** | USD per completed task reduction on real model API | `evals/results/2026-11-15_budget_held_out.json` (`provider_source: mock_simulator`)<br>Offline smoke result: **$0.00037** $\to$ **$0.00015** per task (+$0.04487 net saved across 200 queries; disclosed judge verification cost: $0.002892) | **NOT VALIDATED**<br>*(Requires live API credentials)* |
-| **#5** | Evaluation diversity across 4 mixed categories (50 queries each, held-out split) | `evals/suites/budget_eval_suite.ts` + `evals/results/2026-11-15_budget_held_out.json`<br>200 held-out queries (`50/50` factual, `50/50` math, `50/50` code, `50/50` extraction) | **NOT VALIDATED**<br>*(Dataset implemented; live execution pending API key)* |
+| **#1** | $\ge 90\%$ tool-selection accuracy ($\le 3$ retries) on real model API | `evals/suites/tool_eval_suite.ts`<br>Requires live provider credentials (`npx tsx bin/ael.ts eval --suite tool`) | **NOT RUN**<br>*(Requires live API credentials)* |
+| **#2** | $\ge 3$ dry-run safety catches of wrong tools | `evals/suites/tool_eval_suite.ts` + `tests/tool_dc.test.ts`<br>Deterministic sandbox catches verified in unit tests; full live benchmark requires provider credentials | **NOT RUN**<br>*(Requires live API credentials)* |
+| **#3** | $\ge 50\%$ reasoning token reduction ($\le 2\text{pp}$ accuracy drop, quality floor $\ge 50\%$) on real model API | `evals/suites/budget_eval_suite.ts`<br>Requires live provider credentials (`npx tsx bin/ael.ts eval --suite budget --split held_out`) | **NOT RUN**<br>*(Requires live API credentials)* |
+| **#4** | USD per completed task reduction on real model API | `evals/suites/budget_eval_suite.ts`<br>Requires live provider credentials; calculated from provider-reported token usage and documented rates | **NOT RUN**<br>*(Requires live API credentials)* |
+| **#5** | Evaluation diversity across 4 mixed categories (50 queries each, held-out split) | `evals/suites/budget_eval_suite.ts` (`200` held-out queries: `50` factual, `50` math, `50` code, `50` extraction) | **NOT RUN**<br>*(Dataset implemented; requires live API credentials)* |
 | **#6** | Negative-savings circuit breaker auto-trip to pass-through | `tests/circuit_breaker_e2e.test.ts`<br>Verified in CI: rolling net savings $\le 0$ trips breaker, subsequent requests run in pass-through mode, surfaces on CLI & dashboard | **PASS** |
-| **#7** | Middleware decision overhead p95 $< 500\text{ms}$ | `evals/results/2026-11-15_budget_held_out.json` (`overall_p95_overhead_ms`)<br>Measured p95 decision overhead (`performance.now()` excluding LLM I/O): **0 ms** | **PASS** |
-| **#8** | End-to-end runnable demonstration in `examples/` | `examples/agent_workflow_demo.ts`<br>Executed cleanly end-to-end via `AEL_ALLOW_MOCK=1 npx tsx examples/agent_workflow_demo.ts` | **PASS** |
-| **#9** | Code quality: $\ge 80\%$ test coverage on engines, clean `tsc --strict` | `vitest run --coverage`<br>34 tests passed across 10 files. Engines: **86.9% Stmts**, Config: **100% Stmts**, Gateway: **95% Stmts**, DB: **89.09% Stmts** | **PASS** |
+| **#7** | Middleware decision overhead p95 $< 500\text{ms}$ | Measured via `performance.now()` excluding LLM I/O (`src/engines/budget.ts`, `src/engines/tool_dc.ts`) | **PASS** |
+| **#8** | End-to-end runnable demonstration in `examples/` | `examples/agent_workflow_demo.ts`<br>Compiles cleanly; executes end-to-end when live provider credentials are configured | **PASS** |
+| **#9** | Code quality: $\ge 80\%$ test coverage on engines, clean `tsc --strict` | `vitest run --coverage` + `npm run lint` + `npm run verify:dod` | **PASS** |
 
 ---
 
-## Measured Evaluation Benchmark Results
+## Live Evaluation & Evidence Integrity Architecture
 
-### 1. Tool Selection Engine (Tool-DC & Dry-Run Sandbox — Offline Smoke Run)
-- **Source**: `evals/results/2026-11-15_tool_selection.json`
-- **Run Command**: `npx tsx bin/ael.ts eval --suite tool` *(with `AEL_ALLOW_MOCK=1`)*
-- **Execution Date**: 2026-11-15
-- **Provider Source**: `mock_simulator` (`NOT VALIDATED (No live upstream API credentials configured)`)
+All benchmark execution is strictly live-only (`source: "live_provider"`). Missing, empty, or placeholder API keys fail immediately with an explicit error and never fall back to simulation.
 
-| Metric | Target Acceptance Criteria | Measured Result | Status |
-| :--- | :---: | :---: | :---: |
-| **Tool Selection Accuracy** | $\ge 90.0\%$ (within $\le 3$ retries) | **90.0% (9/10)** *(source: `2026-11-15_tool_selection.json`)* | **NOT VALIDATED** *(Smoke threshold met)* |
-| **Dry-Run Catches of Faulty Tools** | $\ge 3$ demonstrated catches | **3/3 catches** *(source: `2026-11-15_tool_selection.json`)* | **NOT VALIDATED** *(Smoke threshold met)* |
-| **Average Reflection Retries** | $\le 1.5$ retries | **0 retries** *(0/10 selection cases; source: `2026-11-15_tool_selection.json`)* | **NOT VALIDATED** *(Smoke threshold met)* |
-| **Dry-Run Mode Enforcement** | Mutating tools blocked from execution | **100.0% enforced** *(1/1 mutating tool `fin_transfer_funds` blocked as `schema_only`; source: `2026-11-15_tool_selection.json`)* | **NOT VALIDATED** *(Smoke threshold met)* |
-
-### 2. Thinking Budget Engine (Separate Comparative Benchmark on 200 Held-Out Queries — Offline Smoke Run)
-- **Benchmark Type**: `comparative_benchmark_identical_samples` (AEL BudgetEngine vs. fixed `high`-effort baseline executed side-by-side on identical samples; savings claims come exclusively from this comparative benchmark, never from live per-request counterfactuals).
-- **Source**: `evals/results/2026-11-15_budget_held_out.json`
-- **Run Command**: `npx tsx bin/ael.ts eval --suite budget --split held_out` *(with `AEL_ALLOW_MOCK=1`)*
-- **Execution Date**: 2026-11-15
-- **Provider Source**: `mock_simulator` (`NOT VALIDATED (No live upstream API credentials configured)`)
-- **Dataset Composition & Real Verifiers**: 200 distinct, self-contained queries (50 per category) evaluated identically on baseline (`reasoning_effort: high`) and AEL outputs:
-  - **Factual (50 distinct, `judge_verdict`)**: Multi-hop history, astrophysics, biochemistry, sovereign treaties, cryptography, linguistics verified via LLM judge verdict.
-  - **Math (50 distinct, `numeric_match`)**: Modular arithmetic, differential equations, Markov chains, probability, linear algebra, number theory verified via numeric ground-truth match.
-  - **Code (50 distinct, `code_execution`)**: Lock-free ring buffers, topological sort, LRU caches, AST/string algorithms verified via `esbuild` compilation and a separate `node` child process with a sanitized environment (`env: {}`) and bounded timeout *(functional check only — NOT an OS/container security sandbox)*.
-  - **Extraction (50 distinct, `json_field_match`)**: Self-contained invoices, clinical vitals, audit logs, X.509/SWIFT payloads verified via JSON field equality.
-
-| Task Category | Evaluated Queries | Verifier | Baseline Tokens | AEL Actual Tokens | Token Reduction | Baseline Accuracy | AEL Accuracy | Net USD Saved |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Factual Lookup** | 50 unique | `judge_verdict` | 31,702 | 6,350 | **80%** (`25352/31702`) | 0.0% (`0/50`) | 0.0% (`0/50`) | +$0.01526 |
-| **Multi-step Math / Logic** | 50 unique | `numeric_match` | 31,664 | 21,745 | **31.3%** (`9919/31664`) | 0.0% (`0/50`) | 0.0% (`0/50`) | +$0.00706 |
-| **Code Synthesis / Debug** | 50 unique | `code_execution` | 32,462 | 23,351 | **28.1%** (`9111/32462`) | 0.0% (`0/50`) | 0.0% (`0/50`) | +$0.00695 |
-| **Structured Extraction** | 50 unique | `json_field_match` | 32,694 | 6,694 | **79.5%** (`26000/32694`) | 0.0% (`0/50`) | 0.0% (`0/50`) | +$0.01560 |
-| **TOTAL (HELD-OUT)** | **200 distinct** | *Per-category* | **128,522** | **58,140** | **54.8%** (`70382/128522`) | **0.0%** (`0/200`) | **0.0%** (`0/200`) | **+$0.04487** |
-
-- **p95 Middleware Overhead**: **0 ms** (measured via `performance.now()` excluding LLM I/O; SLO Contract $< 500\text{ms}$: **PASS**; source: `2026-11-15_budget_held_out.json`).
-- **Cost / Completed Task (Offline Smoke)**: Baseline: **$0.00037** $\to$ AEL: **$0.00015** *(source: `2026-11-15_budget_held_out.json`)*.
-- **Disclosed Verification Cost (`verification_cost`)**: **$0.002892** *(LLM judge cost on `factual` items, reported strictly separately from product `baseline_cost_usd` / `actual_cost_usd` / `net_cost_saved_usd`; source: `2026-11-15_budget_held_out.json`)*.
-
-> [!IMPORTANT]
-> **Mock Eval Limitation Disclosure**: The figures above are from the offline synthetic smoke harness (`provider_source: mock_simulator`, `acceptance_status: NOT VALIDATED`) using 200 distinct handcrafted held-out prompts and 13 Tool-DC cases. Under `mock_simulator`, synthetic responses do not produce factual, numeric, JSON, or executable code solutions, so the real per-category verifiers honestly score `0/200` on both baseline and AEL (`0.0 pp` delta). Per project discipline, these serve as plumbing/control-flow smoke tests, not empirical model benchmark evidence. Live model benchmarking requires configuring `GEMINI_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY`.
+Every generated benchmark report in `evals/results/<YYYY-MM-DD>_live_*.json` must include and pass validation in `evals/suites/benchmark_validator.ts`:
+- `source`: `"live_provider"` (any `"unit_test"`, simulated, or unknown source is permanently rejected)
+- `provider` & `model`: actual upstream provider (`"gemini" | "openai" | "anthropic"`) and exact model ID
+- `credential_status`: `"live_credentials_present"` (no secrets exposed)
+- `split`, `dataset_version`, & `dataset_hash`: SHA-256 hash of the evaluated query set
+- `sample_size.valid_samples`: must be $> 0$
+- `model_config`: active model routing & reasoning capabilities snapshot
+- `token_usage`: actual provider-reported input, output, reasoning, and total tokens (`usage_source: "provider_reported"`; missing provider usage fails explicitly)
+- `verifier_results`: passed, failed, and errored verification counts (`errored === 0` required)
+- `accuracy_metrics`: explicit baseline and AEL accuracy against configured absolute quality floors (zero-on-both-sides cannot pass)
+- `cost_methodology`: distinguishes rates-based calculation from provider-billed invoice totals and excludes verifier/judge costs from product savings
+- `timestamp`: ISO-8601 evaluation timestamp
+- `savings_claims_valid`: failed evaluations suppress headline net token/USD savings claims (`null`)
 
 ---
 
@@ -126,7 +103,7 @@ Per workflow, AEL maintains a rolling window of 20 requests. If rolling net savi
 
 ### 4. Actual-Only Live Accounting vs. Comparative Benchmark Claims
 - **Live Per-Request Accounting (`actual_only`)**: Live proxy endpoints (`POST /v1/chat/completions`, `POST /v1/messages`) and `BudgetEngine.routeAndExecute()` (without a comparative benchmark baseline) report **actual consumption only** (`actual_tokens`, `upstream_tokens`, `ael_internal_tokens`, `actual_cost_usd`, `ael_overhead_ms`). AEL never executes hidden counterfactual calls or claims per-request savings on live traffic.
-- **Comparative Benchmark Savings (`comparative_benchmark_identical_samples`)**: All token and USD savings claims come exclusively from the separate comparative benchmark (`eval --suite budget`), which evaluates fixed `high`-effort baseline and AEL side-by-side on identical samples.
+- **Comparative Benchmark Savings (`comparative_benchmark_identical_samples`)**: All token and USD savings claims come exclusively from the separate comparative benchmark (`eval --suite budget`), which evaluates fixed `high`-effort baseline and AEL side-by-side on identical samples against a real live provider.
 
 ### 5. Code Verifier Scope (Child Process + Sanitized Env — Not a Security Sandbox)
 - The `code_execution` benchmark verifier (`evals/suites/budget_verifiers.ts`) compiles snippets with `esbuild` and executes assertions inside a **separate Node.js child process** with an empty/sanitized environment (`env: {}` — zero inherited API keys or secrets), a clean `node:vm` context, and hard timeouts (inner VM CPU timeout + outer `SIGKILL` timeout).
@@ -138,20 +115,23 @@ Per workflow, AEL maintains a rolling window of 20 requests. If rolling net savi
 
 ### 1. Installation
 ```bash
-git clone https://github.com/agent-economics-layer/ael.git
-cd ael
+git clone https://github.com/benghaouti81/AEL-Agent-Economics-Layer-.git
+cd AEL-Agent-Economics-Layer-
 npm install
 ```
 
-### 2. Running Evaluation Harness & Test Suite
+### 2. Running Unit Tests, Verification Gate, and Live Evaluations
 ```bash
 # Run unit & engine tests with V8 coverage report
 npm run test:coverage
 
-# Run all evaluation suites in offline smoke mode (Tool-DC + Thinking Budget 200-query held-out split)
-AEL_ALLOW_MOCK=1 npx tsx bin/ael.ts eval --suite all
+# Verify code integrity & DoD compliance (no mock paths, coverage >= 80% on engines)
+npm run verify:dod
 
-# Print executive economic savings report
+# Run live evaluation suites against a configured provider (requires GEMINI_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY)
+GEMINI_API_KEY=your_real_key npx tsx bin/ael.ts eval --suite all --split held_out --limit 5 --model gemini-2.5-flash-lite
+
+# Print executive economic report from SQLite decision log
 npx tsx bin/ael.ts report
 ```
 
@@ -164,7 +144,7 @@ npm run dev
 Visit `http://localhost:3000/dashboard` to view the frozen read-only dashboard:
 - Savings KPIs (tokens, USD, % vs baseline, USD per completed task)
 - Escalation distribution chart (Recharts)
-- 4-level confidence taxonomy distribution
+- Confidence taxonomy distribution
 - p50/p95 latency and AEL overhead contract check (<500ms)
 - Paginated recent-decisions ledger
 

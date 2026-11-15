@@ -53,7 +53,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           if [ -z "$GEMINI_API_KEY" ]; then
-            echo "::error::GEMINI_API_KEY repository secret is missing."
+            echo "::error::GEMINI_API_KEY repository secret is missing. Live evaluation status: NOT RUN (failing workflow rather than simulating)."
             exit 1
           fi
           echo "::add-mask::$GEMINI_API_KEY"
@@ -61,38 +61,31 @@ jobs:
       - name: Spending guard preflight (abort if projected cost > cap)
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          AEL_LIVE_EVAL: '1'
         run: |
-          echo "Live eval configuration: model=${EVAL_MODEL}, limit_per_category=${EVAL_LIMIT}, max_cost_usd=${EVAL_MAX_COST_USD}"
-          npx tsx bin/ael.ts eval --suite all --split held_out --live --model "$EVAL_MODEL" --limit "$EVAL_LIMIT" --max-cost-usd "$EVAL_MAX_COST_USD" --preflight-only
+          echo "Live eval configuration: provider=gemini, model=${EVAL_MODEL}, limit_per_category=${EVAL_LIMIT}, max_cost_usd=${EVAL_MAX_COST_USD}"
+          npx tsx bin/ael.ts eval --suite all --split held_out --provider gemini --model "$EVAL_MODEL" --limit "$EVAL_LIMIT" --max-cost-usd "$EVAL_MAX_COST_USD" --preflight-only
 
       - name: Run Thinking Budget suite live (held_out)
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          AEL_LIVE_EVAL: '1'
-        run: npx tsx bin/ael.ts eval --suite budget --split held_out --live --model "$EVAL_MODEL" --limit "$EVAL_LIMIT" --max-cost-usd "$EVAL_MAX_COST_USD" --db /tmp/live_eval.db
+        run: npx tsx bin/ael.ts eval --suite budget --split held_out --provider gemini --model "$EVAL_MODEL" --limit "$EVAL_LIMIT" --max-cost-usd "$EVAL_MAX_COST_USD" --db /tmp/live_eval.db
 
       - name: Run Tool-DC suite live
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          AEL_LIVE_EVAL: '1'
-        run: npx tsx bin/ael.ts eval --suite tool --live --model "$EVAL_MODEL" --limit "$EVAL_LIMIT" --max-cost-usd "$EVAL_MAX_COST_USD" --db /tmp/live_eval.db
+        run: npx tsx bin/ael.ts eval --suite tool --provider gemini --model "$EVAL_MODEL" --limit "$EVAL_LIMIT" --max-cost-usd "$EVAL_MAX_COST_USD" --db /tmp/live_eval.db
 
-      - name: Verify live result files, model, sample_size, and provider_source
+      - name: Validate live benchmark provenance and acceptance criteria
         run: |
           RUN_DATE=$(date -u +%Y-%m-%d)
-          node -e "
-            const fs = require('fs');
+          npx tsx -e "
+            import fs from 'node:fs';
+            import { assertValidBenchmarkResult } from './evals/suites/benchmark_validator.js';
             for (const f of ['evals/results/${RUN_DATE}_live_budget_held_out.json', 'evals/results/${RUN_DATE}_live_tool_selection.json']) {
               if (!fs.existsSync(f)) throw new Error('Missing live result file: ' + f);
               const data = JSON.parse(fs.readFileSync(f, 'utf8'));
-              if (data.provider_source !== 'gemini') {
-                throw new Error(f + ' has provider_source=' + data.provider_source + ' (expected gemini)');
-              }
-              if (!data.model || !data.sample_size) {
-                throw new Error(f + ' must explicitly record model and sample_size');
-              }
-              console.log('Verified', f, 'provider_source=' + data.provider_source, 'model=' + data.model, 'sample_size=' + JSON.stringify(data.sample_size), 'status=' + data.acceptance_status);
+              assertValidBenchmarkResult(data);
+              console.log('Verified', f, 'source=' + data.source, 'provider=' + data.provider, 'model=' + data.model, 'valid_samples=' + data.sample_size.valid_samples, 'status=' + data.acceptance_status);
             }
           "
 

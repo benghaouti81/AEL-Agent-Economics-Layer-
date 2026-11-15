@@ -28,6 +28,7 @@ import { SEARCH_TOOLS, MockSearchServer } from './evals/mock_servers/search_serv
 import { DESTRUCTIVE_TOOLS, MockDestructiveServer } from './evals/mock_servers/destructive_server.js';
 import { runToolEvalSuite } from './evals/suites/tool_eval_suite.js';
 import { runBudgetEvalSuite } from './evals/suites/budget_eval_suite.js';
+import { LiveProviderType, resolveLiveProviderProfile } from './evals/suites/spending_guard.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -59,16 +60,6 @@ async function startServer() {
   const activePreset = config.presets[config.active_preset] || config.presets.balanced;
   const budgetEngine = new BudgetEngine(llmClient, logStore, circuitBreaker, activePreset);
   const mcpGateway = new McpGateway(registry, sandbox, toolDcEngine, logStore, config.provider);
-
-  // Auto-seed benchmark data if database is empty on boot
-  const initialSummary = logStore.getSummary();
-  if (initialSummary.total_requests === 0) {
-    console.log('[AEL Server] Empty decision log detected. Running initial verification benchmark suites...');
-    await runToolEvalSuite(logStore);
-    await runBudgetEvalSuite(logStore, 'held_out');
-    console.log('[AEL Server] Seeded verified benchmark data into SQLite decision log.');
-  }
-
   const app = express();
   app.use(express.json());
 
@@ -106,10 +97,10 @@ async function startServer() {
           },
         ],
         usage: {
-          prompt_tokens: Math.ceil(lastUserMsg.length / 4),
-          completion_tokens: Math.ceil(result.text.length / 4),
+          prompt_tokens: result.input_tokens,
+          completion_tokens: result.output_tokens,
           total_tokens: result.total_tokens,
-          reasoning_tokens: Math.max(0, result.total_tokens - (Math.ceil(lastUserMsg.length / 4) + Math.ceil(result.text.length / 4))),
+          reasoning_tokens: result.reasoning_tokens,
         },
         ael_economics: {
           accounting_mode: result.accounting_mode,
@@ -148,8 +139,8 @@ async function startServer() {
         content: [{ type: 'text', text: result.text }],
         model: model || config.provider.default_model,
         usage: {
-          input_tokens: Math.ceil(lastUserMsg.length / 4),
-          output_tokens: Math.ceil(result.text.length / 4),
+          input_tokens: result.input_tokens,
+          output_tokens: result.output_tokens,
         },
         ael_economics: {
           accounting_mode: result.accounting_mode,
@@ -222,18 +213,22 @@ async function startServer() {
     res.json(logStore.getRecentDecisions(page, limit));
   });
 
-  // Evaluation trigger endpoint
+  // Evaluation trigger endpoint (Live provider credentials required — no simulation)
   app.post('/api/eval/run', async (req, res) => {
     try {
       const suite = req.body.suite || 'all';
+      const provider = req.body.provider as LiveProviderType | undefined;
+      const limit = req.body.limit ? Number(req.body.limit) : undefined;
+      resolveLiveProviderProfile({ provider });
+
       let toolRes = null;
       let budgetRes = null;
 
       if (suite === 'tool' || suite === 'all') {
-        toolRes = await runToolEvalSuite(logStore);
+        toolRes = await runToolEvalSuite(logStore, { provider, limit });
       }
       if (suite === 'budget' || suite === 'all') {
-        budgetRes = await runBudgetEvalSuite(logStore, 'held_out');
+        budgetRes = await runBudgetEvalSuite(logStore, 'held_out', { provider, limit });
       }
 
       res.json({
@@ -243,7 +238,9 @@ async function startServer() {
         summary: logStore.getSummary(),
       });
     } catch (err: any) {
-      res.status(500).json({ error: err.message || String(err) });
+      const msg = err?.message || String(err);
+      const status = msg.includes('Missing') || msg.includes('Unsupported provider') ? 400 : 500;
+      res.status(status).json({ error: msg });
     }
   });
 

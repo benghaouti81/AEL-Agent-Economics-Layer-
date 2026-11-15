@@ -8,7 +8,7 @@
 import crypto from 'node:crypto';
 import { ToolRegistry } from '../mcp/registry.js';
 import { DryRunSandbox, DryRunResult } from '../mcp/sandbox.js';
-import { LLMClient } from '../llm/client.js';
+import { LLMClient, LLMResponse } from '../llm/client.js';
 import { DecisionLogStore } from '../db/decision_log.js';
 import { DecisionRecord, ToolRecord } from '../models/contracts.js';
 
@@ -22,9 +22,15 @@ export interface ToolDCSelectionResult {
   execution_result?: any;
   error?: string;
   overhead_tokens: number;
+  overhead_input_tokens: number;
+  overhead_output_tokens: number;
+  overhead_reasoning_tokens: number;
   overhead_cost_usd: number;
   baseline_tokens: number;
   baseline_cost_usd: number;
+  provider_source?: LLMResponse['provider_source'];
+  model?: string;
+  usage_source?: LLMResponse['usage_source'];
 }
 
 export class ToolDCEngine {
@@ -135,6 +141,9 @@ export class ToolDCEngine {
                 cached: true,
                 error: catchErr,
                 overhead_tokens: 0,
+                overhead_input_tokens: 0,
+                overhead_output_tokens: 0,
+                overhead_reasoning_tokens: 0,
                 overhead_cost_usd: 0,
                 baseline_tokens: baselineTokens,
                 baseline_cost_usd: baselineCostUsd,
@@ -178,6 +187,9 @@ export class ToolDCEngine {
               execution_result: execRes.result,
               error: execRes.error,
               overhead_tokens: 0,
+              overhead_input_tokens: 0,
+              overhead_output_tokens: 0,
+              overhead_reasoning_tokens: 0,
               overhead_cost_usd: 0,
               baseline_tokens: baselineTokens,
               baseline_cost_usd: baselineCostUsd,
@@ -199,6 +211,9 @@ export class ToolDCEngine {
         cached: false,
         error: 'No candidate tools available in registry',
         overhead_tokens: 0,
+        overhead_input_tokens: 0,
+        overhead_output_tokens: 0,
+        overhead_reasoning_tokens: 0,
         overhead_cost_usd: 0,
         baseline_tokens: baselineTokens,
         baseline_cost_usd: baselineCostUsd,
@@ -211,7 +226,13 @@ export class ToolDCEngine {
     let finalArgs: Record<string, any> = {};
     let dryRunResult: DryRunResult | null = null;
     let ael_overhead_tokens = 0;
+    let ael_overhead_input_tokens = 0;
+    let ael_overhead_output_tokens = 0;
+    let ael_overhead_reasoning_tokens = 0;
     let ael_overhead_cost = 0;
+    let lastProviderSource: LLMResponse['provider_source'] | undefined;
+    let lastModel: string | undefined;
+    let lastUsageSource: LLMResponse['usage_source'] | undefined;
     let dryRunCaughtError: string | null = null;
 
     // TRY - CHECK - RETRY FSM Loop
@@ -221,7 +242,13 @@ export class ToolDCEngine {
       const llmRes = await this.llm.complete(prompt, { reasoning_effort: 'none' });
       
       ael_overhead_tokens += llmRes.total_tokens;
+      ael_overhead_input_tokens += llmRes.input_tokens;
+      ael_overhead_output_tokens += llmRes.output_tokens;
+      ael_overhead_reasoning_tokens += llmRes.reasoning_tokens;
       ael_overhead_cost += llmRes.cost_usd;
+      lastProviderSource = llmRes.provider_source;
+      lastModel = llmRes.model;
+      lastUsageSource = llmRes.usage_source;
 
       let proposal: { tool: string; arguments: Record<string, any>; reasoning?: string };
       try {
@@ -302,9 +329,15 @@ export class ToolDCEngine {
         cached: false,
         error: lastError || 'Tool-DC retries exhausted without verified match',
         overhead_tokens: ael_overhead_tokens,
+        overhead_input_tokens: ael_overhead_input_tokens,
+        overhead_output_tokens: ael_overhead_output_tokens,
+        overhead_reasoning_tokens: ael_overhead_reasoning_tokens,
         overhead_cost_usd: ael_overhead_cost,
         baseline_tokens: baselineTokens,
         baseline_cost_usd: baselineCostUsd,
+        provider_source: lastProviderSource,
+        model: lastModel,
+        usage_source: lastUsageSource,
       };
     }
 
@@ -359,9 +392,15 @@ export class ToolDCEngine {
       execution_result: liveExec.result,
       error: liveExec.error,
       overhead_tokens: ael_overhead_tokens,
+      overhead_input_tokens: ael_overhead_input_tokens,
+      overhead_output_tokens: ael_overhead_output_tokens,
+      overhead_reasoning_tokens: ael_overhead_reasoning_tokens,
       overhead_cost_usd: ael_overhead_cost,
       baseline_tokens: baselineTokens,
       baseline_cost_usd: baselineCostUsd,
+      provider_source: lastProviderSource,
+      model: lastModel,
+      usage_source: lastUsageSource,
     };
   }
 
@@ -462,10 +501,16 @@ Output STRICT JSON ONLY in this format:
       cached: false,
       execution_result: execRes.result,
       error: execRes.error,
-      overhead_tokens: 0,
-      overhead_cost_usd: 0,
+      overhead_tokens: llmRes.total_tokens,
+      overhead_input_tokens: llmRes.input_tokens,
+      overhead_output_tokens: llmRes.output_tokens,
+      overhead_reasoning_tokens: llmRes.reasoning_tokens,
+      overhead_cost_usd: llmRes.cost_usd,
       baseline_tokens: baselineTokens,
       baseline_cost_usd: baselineCostUsd,
+      provider_source: llmRes.provider_source,
+      model: llmRes.model,
+      usage_source: llmRes.usage_source,
     };
   }
 

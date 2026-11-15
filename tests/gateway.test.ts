@@ -1,5 +1,6 @@
 /**
  * Unit Tests: MCP Gateway & Meta-Tools Surface
+ * Uses an isolated unit-test LLM double (never generates benchmark reports or performance evidence).
  * @license Apache-2.0
  */
 
@@ -7,13 +8,12 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { ToolRegistry } from '../src/mcp/registry.js';
 import { DryRunSandbox } from '../src/mcp/sandbox.js';
 import { ToolDCEngine } from '../src/engines/tool_dc.js';
-import { LLMClient } from '../src/llm/client.js';
 import { DecisionLogStore } from '../src/db/decision_log.js';
 import { McpGateway } from '../src/mcp/gateway.js';
 import { FILESYSTEM_TOOLS, MockFilesystemServer } from '../evals/mock_servers/filesystem_server.js';
 import { SEARCH_TOOLS, MockSearchServer } from '../evals/mock_servers/search_server.js';
 import { DESTRUCTIVE_TOOLS, MockDestructiveServer } from '../evals/mock_servers/destructive_server.js';
-import { ProviderProfile } from '../src/config/ael_config.js';
+import { createUnitTestLLMClient, createUnitTestProviderProfile } from './helpers/test_llm_double.js';
 
 describe('McpGateway Surface', () => {
   let gateway: McpGateway;
@@ -22,7 +22,6 @@ describe('McpGateway Surface', () => {
   let logStore: DecisionLogStore;
 
   beforeEach(() => {
-    process.env.AEL_ALLOW_MOCK = '1';
     registry = new ToolRegistry([...FILESYSTEM_TOOLS, ...SEARCH_TOOLS, ...DESTRUCTIVE_TOOLS]);
     sandbox = new DryRunSandbox();
     const fs = new MockFilesystemServer();
@@ -33,20 +32,8 @@ describe('McpGateway Surface', () => {
     sandbox.registerExecutor('destructive', (n, a, d) => dest.execute(n, a, d));
 
     logStore = new DecisionLogStore(':memory:');
-    const provider: ProviderProfile = {
-      name: 'mock',
-      type: 'mock',
-      api_key_env: 'KEY',
-      default_model: 'mock',
-      cheap_model: 'mock',
-      reasoning_model: 'mock',
-      supports_reasoning_effort: true,
-      supports_logprobs: true,
-      input_cost_per_million: 0.1,
-      output_cost_per_million: 0.4,
-      reasoning_cost_per_million: 0.4,
-    };
-    const llm = new LLMClient(provider);
+    const provider = createUnitTestProviderProfile({ supports_logprobs: true });
+    const llm = createUnitTestLLMClient(provider);
     const toolDc = new ToolDCEngine(registry, sandbox, llm, logStore);
     gateway = new McpGateway(registry, sandbox, toolDc, logStore, provider);
   });

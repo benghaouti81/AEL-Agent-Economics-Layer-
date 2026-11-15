@@ -23,12 +23,16 @@ import { McpGateway } from '../src/mcp/gateway.js';
 import { FILESYSTEM_TOOLS, MockFilesystemServer } from '../evals/mock_servers/filesystem_server.js';
 import { SEARCH_TOOLS, MockSearchServer } from '../evals/mock_servers/search_server.js';
 import { DESTRUCTIVE_TOOLS, MockDestructiveServer } from '../evals/mock_servers/destructive_server.js';
-import { DEFAULT_PRESETS, ProviderProfile } from '../src/config/ael_config.js';
+import { DEFAULT_PRESETS } from '../src/config/ael_config.js';
+import { resolveLiveProviderProfile } from '../evals/suites/spending_guard.js';
 
 async function main() {
   console.log('================================================================');
   console.log('        AEL (AGENT ECONOMICS LAYER) END-TO-END DEMO             ');
   console.log('================================================================\n');
+
+  // Require valid live provider credentials — never fall back to mock simulation
+  const { profile: provider } = resolveLiveProviderProfile();
 
   // 1. Initialize LogStore & Registry
   const logStore = new DecisionLogStore('./data/ael_demo.db');
@@ -46,26 +50,6 @@ async function main() {
   sandbox.registerExecutor('filesystem', (name, args, isDryRun) => fsServer.execute(name, args, isDryRun));
   sandbox.registerExecutor('search', (name, args, isDryRun) => searchServer.execute(name, args, isDryRun));
   sandbox.registerExecutor('destructive', (name, args, isDryRun) => destructiveServer.execute(name, args, isDryRun));
-
-  const hasLiveGeminiKey = Boolean(
-    process.env.GEMINI_API_KEY &&
-    process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY' &&
-    process.env.GEMINI_API_KEY !== 'YOUR_API_KEY'
-  );
-
-  const provider: ProviderProfile = {
-    name: hasLiveGeminiKey ? 'demo_provider' : 'demo_mock_provider',
-    type: hasLiveGeminiKey ? 'gemini' : 'mock',
-    api_key_env: 'GEMINI_API_KEY',
-    default_model: 'gemini-2.5-flash',
-    cheap_model: 'gemini-2.5-flash-lite',
-    reasoning_model: 'gemini-2.5-pro',
-    supports_reasoning_effort: true,
-    supports_logprobs: true,
-    input_cost_per_million: 0.10,
-    output_cost_per_million: 0.40,
-    reasoning_cost_per_million: 0.40,
-  };
 
   const llm = new LLMClient(provider);
   const toolDc = new ToolDCEngine(registry, sandbox, llm, logStore);

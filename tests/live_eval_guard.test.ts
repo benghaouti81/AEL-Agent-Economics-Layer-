@@ -1,5 +1,5 @@
 /**
- * Unit Tests: Live Evaluation Credentials & Spending Guard (C-2)
+ * Unit Tests: Live Evaluation Credentials, Spending Guard & Runner Integrity
  * @license Apache-2.0
  */
 
@@ -13,18 +13,102 @@ import {
   assertValidGeminiKey,
   assertWithinSpendingGuard,
   estimateProjectedEvalCost,
+  resolveLiveProviderProfile,
 } from '../evals/suites/spending_guard.js';
 import { buildLiveGeminiBudgetProfile, projectBudgetEvalCost, runBudgetEvalSuite } from '../evals/suites/budget_eval_suite.js';
 import { buildLiveGeminiToolProfile, projectToolEvalCost, runToolEvalSuite } from '../evals/suites/tool_eval_suite.js';
+import { validateBenchmarkResult } from '../evals/suites/benchmark_validator.js';
+
+function createOpenAIEvalFetchStub() {
+  return vi.fn(async (_url: any, init: any) => {
+    const body = JSON.parse(String(init?.body || '{}'));
+    const prompt: string = body?.messages?.[0]?.content || '';
+    const isHigh = body?.reasoning_effort === 'high';
+
+    let content = 'Fallback response';
+    if (prompt.includes('VERIFY ANSWER CORRECTNESS')) {
+      content = JSON.stringify({ correct: true });
+    } else if (prompt.includes('SELECT TOOL AND ARGUMENTS')) {
+      const taskMatch = prompt.match(/for this user task:\s*\n?"([^"]+)"|SELECT TOOL AND ARGUMENTS:\s*"([^"]+)"/);
+      const lower = (taskMatch ? (taskMatch[1] || taskMatch[2] || '') : prompt.split('\n').slice(0, 3).join(' ')).toLowerCase();
+      if (lower.includes('sql') || lower.includes('select') || lower.includes('warehouse')) {
+        content = JSON.stringify({ tool: 'db_query_readonly', arguments: { sql: 'SELECT 1' } });
+      } else if (lower.includes('transfer') || lower.includes('$50')) {
+        content = JSON.stringify({
+          tool: 'fin_transfer_funds',
+          arguments: { source_account: 'acc_001', target_account: 'acc_002', amount_usd: 50 },
+        });
+      } else if (lower.includes('list') || lower.includes('inspect files')) {
+        content = JSON.stringify({ tool: 'fs_list_directory', arguments: { path: '/workspace' } });
+      } else if (lower.includes('search') || lower.includes('find') || lower.includes('query documentation')) {
+        content = JSON.stringify({ tool: 'search_knowledge_base', arguments: { query: 'economics layer' } });
+      } else {
+        content = JSON.stringify({ tool: 'fs_read_file', arguments: { path: '/workspace/README.md' } });
+      }
+    } else if (prompt.includes('Apollo 11')) {
+      content = 'Apollo 11 landed on the Moon in 1969.';
+    } else if (prompt.includes('distinct prime factors of 360')) {
+      content = 'The distinct prime factors of 360 are 2, 3, and 5. \\boxed{10}';
+    } else if (prompt.includes('reverseInPlace')) {
+      content = [
+        '```ts',
+        'function reverseInPlace<T>(arr: T[]): T[] {',
+        '  let l = 0, r = arr.length - 1;',
+        '  while (l < r) { [arr[l], arr[r]] = [arr[r], arr[l]]; l++; r--; }',
+        '  return arr;',
+        '}',
+        '```',
+      ].join('\n');
+    } else if (prompt.includes('Jane Doe')) {
+      content = JSON.stringify({ name: 'Jane Doe', email: 'jane.doe@acme.io', phone: '+1-555-0192' });
+    }
+
+    const promptTokens = 40;
+    const completionTokens = 30;
+    const reasoningTokens = isHigh ? 450 : 20;
+
+    return {
+      ok: true,
+      json: async () => ({
+        model: body?.model || 'gpt-4o-mini',
+        choices: [
+          {
+            message: { content },
+            logprobs: { content: [{ logprob: -0.04 }] },
+          },
+        ],
+        usage: {
+          prompt_tokens: promptTokens,
+          completion_tokens: completionTokens,
+          total_tokens: promptTokens + completionTokens + reasoningTokens,
+          completion_tokens_details: {
+            reasoning_tokens: reasoningTokens,
+          },
+        },
+      }),
+    };
+  });
+}
 
 describe('Live Evaluation Credentials & Spending Guard', () => {
   const origGeminiKey = process.env.GEMINI_API_KEY;
+  const origOpenAIKey = process.env.OPENAI_API_KEY;
+  const origAnthropicKey = process.env.ANTHROPIC_API_KEY;
   const origLiveEval = process.env.AEL_LIVE_EVAL;
   const tmpDbs: string[] = [];
 
   afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+
     if (origGeminiKey === undefined) delete process.env.GEMINI_API_KEY;
     else process.env.GEMINI_API_KEY = origGeminiKey;
+
+    if (origOpenAIKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = origOpenAIKey;
+
+    if (origAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = origAnthropicKey;
 
     if (origLiveEval === undefined) delete process.env.AEL_LIVE_EVAL;
     else process.env.AEL_LIVE_EVAL = origLiveEval;
@@ -35,17 +119,21 @@ describe('Live Evaluation Credentials & Spending Guard', () => {
     tmpDbs.length = 0;
   });
 
-  it('requires a non-placeholder GEMINI_API_KEY in live mode and never falls back to mock', async () => {
+  it('requires valid live credentials and never falls back to simulation', async () => {
     delete process.env.GEMINI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+
     expect(() => assertValidGeminiKey(undefined)).toThrow(/GEMINI_API_KEY/);
     expect(() => assertValidGeminiKey('MY_GEMINI_API_KEY')).toThrow(/GEMINI_API_KEY/);
+    expect(() => resolveLiveProviderProfile()).toThrow(/Missing live provider credentials/);
 
     const dbPath = path.join(os.tmpdir(), `ael_live_test_${Date.now()}.db`);
     tmpDbs.push(dbPath);
     const store = new DecisionLogStore(dbPath);
 
-    await expect(runToolEvalSuite(store, { live: true })).rejects.toThrow(/GEMINI_API_KEY/);
-    await expect(runBudgetEvalSuite(store, 'held_out', { live: true })).rejects.toThrow(/GEMINI_API_KEY/);
+    await expect(runToolEvalSuite(store)).rejects.toThrow(/Missing live provider credentials/);
+    await expect(runBudgetEvalSuite(store, 'held_out')).rejects.toThrow(/Missing live provider credentials/);
     store.close();
   });
 
@@ -58,7 +146,6 @@ describe('Live Evaluation Credentials & Spending Guard', () => {
     expect(combinedCost).toBeLessThan(MAX_LIVE_EVAL_COST_USD);
     expect(() => assertWithinSpendingGuard(combinedCost, MAX_LIVE_EVAL_COST_USD, 'combined')).not.toThrow();
 
-    // Expensive pricing profile must trigger spending guard abort (> $1.00)
     const expensiveProj = estimateProjectedEvalCost({
       queries: Array.from({ length: 200 }, (_, i) => `Complex query ${i}`),
       promptOverheadCharsPerCall: 200,
@@ -83,22 +170,22 @@ describe('Live Evaluation Credentials & Spending Guard', () => {
     const store = new DecisionLogStore(dbPath);
 
     await expect(
-      runBudgetEvalSuite(store, 'held_out', { live: true, maxCostUsd: 0.01 })
+      runBudgetEvalSuite(store, 'held_out', { provider: 'gemini', maxCostUsd: 0.01 })
     ).rejects.toThrow(/Spending Guard ABORT/);
 
     await expect(
-      runToolEvalSuite(store, { live: true, maxCostUsd: 0.001 })
+      runToolEvalSuite(store, { provider: 'gemini', maxCostUsd: 0.001 })
     ).rejects.toThrow(/Spending Guard ABORT/);
 
     store.close();
   });
 
-  it('reports verifier/judge costs separately from product costs as disclosed verification_cost (P0-20)', async () => {
-    const origAllowMock = process.env.AEL_ALLOW_MOCK;
-    process.env.AEL_ALLOW_MOCK = '1';
+  it('reports verifier/judge costs separately from product costs as disclosed verification_cost using provider-reported tokens (P0-20)', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test-guard-valid-key';
     delete process.env.GEMINI_API_KEY;
-    delete process.env.OPENAI_API_KEY;
     delete process.env.ANTHROPIC_API_KEY;
+
+    vi.stubGlobal('fetch', createOpenAIEvalFetchStub());
 
     const dbPath = path.join(os.tmpdir(), `ael_verif_cost_${Date.now()}.db`);
     tmpDbs.push(dbPath);
@@ -111,7 +198,11 @@ describe('Live Evaluation Credentials & Spending Guard', () => {
     });
 
     try {
-      const result = await runBudgetEvalSuite(store, 'tuning');
+      const result = await runBudgetEvalSuite(store, 'tuning', { provider: 'openai' });
+      expect(result.source).toBe('live_provider');
+      expect(result.provider).toBe('openai');
+      expect(result.credential_status).toBe('live_credentials_present');
+      expect(result.savings_claims_valid).toBe(true);
       expect(typeof result.verification_cost).toBe('number');
       expect(result.verification_cost).toBeGreaterThan(0);
 
@@ -120,11 +211,9 @@ describe('Live Evaluation Credentials & Spending Guard', () => {
       expect(factualMetric.verification_cost).toBeGreaterThan(0);
       expect(mathMetric.verification_cost).toBe(0);
 
-      // Sum of category verification_cost equals disclosed top-level verification_cost
       const catVerifSum = Object.values(result.categories).reduce((s, c) => s + c.verification_cost, 0);
       expect(result.verification_cost).toBeCloseTo(catVerifSum, 5);
 
-      // Net product savings excludes verification_cost
       const catProductNetSum = Object.values(result.categories).reduce(
         (s, c) => s + (c.baseline_cost_usd - c.actual_cost_usd),
         0
@@ -132,24 +221,21 @@ describe('Live Evaluation Credentials & Spending Guard', () => {
       expect(result.overall_net_savings_usd).toBeCloseTo(catProductNetSum, 4);
     } finally {
       writeSpy.mockRestore();
-      if (origAllowMock === undefined) delete process.env.AEL_ALLOW_MOCK;
-      else process.env.AEL_ALLOW_MOCK = origAllowMock;
       store.close();
     }
   });
 
-  it('caps tasks per category with limit and records model + sample_size explicitly in eval results (P0-21)', async () => {
-    const origAllowMock = process.env.AEL_ALLOW_MOCK;
-    process.env.AEL_ALLOW_MOCK = '1';
+  it('caps tasks per category with limit and records model + sample_size + full provenance explicitly in live eval results (P0-21)', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test-guard-valid-key';
     delete process.env.GEMINI_API_KEY;
-    delete process.env.OPENAI_API_KEY;
     delete process.env.ANTHROPIC_API_KEY;
+
+    vi.stubGlobal('fetch', createOpenAIEvalFetchStub());
 
     const dbPath = path.join(os.tmpdir(), `ael_limit_test_${Date.now()}.db`);
     tmpDbs.push(dbPath);
     const store = new DecisionLogStore(dbPath);
 
-    // Prevent test from overwriting committed held_out / tool result files on disk
     const origWriteFileSync = fs.writeFileSync.bind(fs);
     const writeSpy = vi.spyOn(fs, 'writeFileSync').mockImplementation((file, data, options) => {
       const f = String(file);
@@ -172,25 +258,32 @@ describe('Live Evaluation Credentials & Spending Guard', () => {
       expect(limitedToolProj.queryCount).toBe(5);
 
       const budgetRes = await runBudgetEvalSuite(store, 'held_out', {
-        limit: 5,
-        model: 'gemini-2.5-flash-lite',
+        provider: 'openai',
+        limit: 1,
+        model: 'gpt-4o-mini',
       });
-      expect(budgetRes.model).toBe('gemini-2.5-flash-lite');
-      expect(budgetRes.total_queries).toBe(20);
+      expect(budgetRes.source).toBe('live_provider');
+      expect(budgetRes.model).toBe('gpt-4o-mini');
+      expect(budgetRes.total_queries).toBe(4);
       expect(budgetRes.sample_size).toEqual({
-        total_queries: 20,
-        per_category: { factual: 5, math: 5, code: 5, extraction: 5 },
-        limit_per_category: 5,
+        total_queries: 4,
+        valid_samples: 4,
+        per_category: { factual: 1, math: 1, code: 1, extraction: 1 },
+        limit_per_category: 1,
         full_dataset_queries: 200,
       });
-      expect(budgetRes.run_command).toContain('--limit 5');
-      expect(budgetRes.run_command).toContain('--model gemini-2.5-flash-lite');
+      expect(budgetRes.run_command).toContain('--provider openai');
+      expect(budgetRes.run_command).toContain('--limit 1');
+      expect(budgetRes.run_command).toContain('--model gpt-4o-mini');
+      expect(validateBenchmarkResult(budgetRes).valid).toBe(true);
 
       const toolRes = await runToolEvalSuite(store, {
+        provider: 'openai',
         limit: 5,
-        model: 'gemini-2.5-flash-lite',
+        model: 'gpt-4o-mini',
       });
-      expect(toolRes.model).toBe('gemini-2.5-flash-lite');
+      expect(toolRes.source).toBe('live_provider');
+      expect(toolRes.model).toBe('gpt-4o-mini');
       expect(toolRes.selection_cases_total).toBe(5);
       expect(toolRes.dry_run_catch_cases_total).toBe(3);
       expect(toolRes.total_cases).toBe(8);
@@ -198,15 +291,16 @@ describe('Live Evaluation Credentials & Spending Guard', () => {
         selection_cases: 5,
         dry_run_catch_cases: 3,
         total_cases: 8,
+        valid_samples: 8,
         limit_per_category: 5,
         full_selection_cases: 10,
       });
+      expect(toolRes.run_command).toContain('--provider openai');
       expect(toolRes.run_command).toContain('--limit 5');
-      expect(toolRes.run_command).toContain('--model gemini-2.5-flash-lite');
+      expect(toolRes.run_command).toContain('--model gpt-4o-mini');
+      expect(validateBenchmarkResult(toolRes).valid).toBe(true);
     } finally {
       writeSpy.mockRestore();
-      if (origAllowMock === undefined) delete process.env.AEL_ALLOW_MOCK;
-      else process.env.AEL_ALLOW_MOCK = origAllowMock;
       store.close();
     }
   });

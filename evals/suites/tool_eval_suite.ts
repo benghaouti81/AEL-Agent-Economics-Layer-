@@ -1,6 +1,6 @@
 /**
  * AEL Tool-DC Evaluation Suite
- * Verifies:
+ * Verifies against live LLM providers ONLY (zero mock simulator fallback):
  * 1. >= 90% tool-selection accuracy within <= 3 retries
  * 2. >= 3 demonstrated dry-run catches of wrong tools before side effects
  * @license Apache-2.0
@@ -20,14 +20,25 @@ import { SEARCH_TOOLS, MockSearchServer } from '../mock_servers/search_server.js
 import { DESTRUCTIVE_TOOLS, MockDestructiveServer } from '../mock_servers/destructive_server.js';
 import { ProviderProfile } from '../../src/config/ael_config.js';
 import {
+  LiveProviderType,
   MAX_LIVE_EVAL_COST_USD,
-  assertValidGeminiKey,
   assertWithinSpendingGuard,
+  buildLiveProviderProfile,
   estimateProjectedEvalCost,
+  resolveLiveProviderProfile,
 } from './spending_guard.js';
+import {
+  BENCHMARK_QUALITY_FLOORS,
+  BenchmarkSource,
+  CostMethodology,
+  ModelConfigurationSnapshot,
+  VerifierResultsSummary,
+  computeDatasetHash,
+} from './benchmark_validator.js';
 
 export interface ToolEvalOptions {
   live?: boolean;
+  provider?: LiveProviderType;
   maxCostUsd?: number;
   limit?: number;
   model?: string;
@@ -35,23 +46,47 @@ export interface ToolEvalOptions {
 
 export interface ToolEvalResult {
   suite_name: string;
+  source: BenchmarkSource;
+  provider: LiveProviderType;
+  provider_source: string;
+  model: string;
+  credential_status: string;
+  split: string;
+  dataset_version: string;
+  dataset_hash: string;
   timestamp: string;
   execution_date: string;
   run_command: string;
   live_api_credentials_present: boolean;
-  provider_source: string;
-  model: string;
+  model_config: ModelConfigurationSnapshot;
   sample_size: {
     selection_cases: number;
     dry_run_catch_cases: number;
     total_cases: number;
+    valid_samples: number;
     limit_per_category: number | null;
     full_selection_cases: number;
   };
-  acceptance_status:
-    | 'PASS'
-    | 'NOT VALIDATED (No live upstream API credentials configured)'
-    | 'NOT VALIDATED (Thresholds not reached)';
+  token_usage: {
+    ael_input_tokens: number;
+    ael_output_tokens: number;
+    ael_reasoning_tokens: number;
+    ael_total_tokens: number;
+    baseline_schema_tokens: number;
+    usage_source: 'provider_reported';
+  };
+  verifier_results: VerifierResultsSummary;
+  accuracy_metrics: {
+    selection_correct: number;
+    selection_total: number;
+    selection_accuracy: number;
+    dry_run_catches: number;
+    dry_run_catches_total: number;
+    quality_floor: number;
+  };
+  cost_methodology: CostMethodology;
+  savings_claims_valid: boolean;
+  acceptance_status: 'PASS' | 'FAIL (Thresholds or verifiers not satisfied)';
   total_cases: number;
   selection_cases_total: number;
   successful_selections: number;
@@ -74,6 +109,8 @@ export interface ToolEvalResult {
   }>;
 }
 
+export const TOOL_EVAL_DATASET_VERSION = 'ael-tool-dc-v1.0-13c';
+
 const TOOL_EVAL_TEST_CASES = [
   { query: 'Read the contents of README.md in the workspace', expected_tool: 'fs_read_file' },
   { query: 'Search the documentation for information on economics layer', expected_tool: 'search_knowledge_base' },
@@ -87,29 +124,8 @@ const TOOL_EVAL_TEST_CASES = [
   { query: 'Read file /workspace/src/index.ts source code', expected_tool: 'fs_read_file' },
 ];
 
-function getToolGeminiPricingForModel(model: string): { input: number; output: number; reasoning: number } {
-  if (/2\.5-pro/i.test(model)) {
-    return { input: 1.25, output: 10.0, reasoning: 10.0 };
-  }
-  return { input: 0.10, output: 0.40, reasoning: 0.40 };
-}
-
 export function buildLiveGeminiToolProfile(model?: string): ProviderProfile {
-  const resolvedModel = (model || process.env.AEL_LIVE_MODEL || 'gemini-2.5-flash').trim();
-  const pricing = getToolGeminiPricingForModel(resolvedModel);
-  return {
-    name: 'live_gemini',
-    type: 'gemini',
-    api_key_env: 'GEMINI_API_KEY',
-    default_model: resolvedModel,
-    cheap_model: 'gemini-2.5-flash-lite',
-    reasoning_model: 'gemini-2.5-pro',
-    supports_reasoning_effort: true,
-    supports_logprobs: false,
-    input_cost_per_million: pricing.input,
-    output_cost_per_million: pricing.output,
-    reasoning_cost_per_million: pricing.reasoning,
-  };
+  return buildLiveProviderProfile('gemini', model);
 }
 
 export function projectToolEvalCost(
@@ -132,6 +148,12 @@ export async function runToolEvalSuite(
   logStore: DecisionLogStore,
   options: ToolEvalOptions = {}
 ): Promise<ToolEvalResult> {
+  // Always require explicit valid live provider credentials — never fall back to mock simulation
+  const { profile: provider, credentialStatus } = resolveLiveProviderProfile({
+    provider: options.provider,
+    model: options.model,
+  });
+
   const registry = new ToolRegistry([
     ...FILESYSTEM_TOOLS,
     ...SEARCH_TOOLS,
@@ -147,68 +169,16 @@ export async function runToolEvalSuite(
   sandbox.registerExecutor('search', (name, args, isDryRun) => searchServer.execute(name, args, isDryRun));
   sandbox.registerExecutor('destructive', (name, args, isDryRun) => destructiveServer.execute(name, args, isDryRun));
 
-  const liveMode = Boolean(options.live || process.env.AEL_LIVE_EVAL === '1');
   const maxCostUsd = options.maxCostUsd ?? Number(process.env.AEL_MAX_EVAL_COST_USD || MAX_LIVE_EVAL_COST_USD);
-
-  let hasLiveApiKey = false;
-  let providerType: 'openai' | 'anthropic' | 'gemini' | 'mock' = 'mock';
-
-  if (liveMode) {
-    assertValidGeminiKey(process.env.GEMINI_API_KEY);
-    hasLiveApiKey = true;
-    providerType = 'gemini';
-  } else {
-    hasLiveApiKey = Boolean(
-      (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY' && process.env.GEMINI_API_KEY !== 'YOUR_API_KEY') ||
-      (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'MY_API_KEY' && process.env.OPENAI_API_KEY !== 'YOUR_API_KEY') ||
-      (process.env.ANTHROPIC_API_KEY && process.env.ANTHROPIC_API_KEY !== 'MY_API_KEY' && process.env.ANTHROPIC_API_KEY !== 'YOUR_API_KEY')
-    );
-
-    providerType = hasLiveApiKey
-      ? (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'MY_API_KEY'
-          ? 'openai'
-          : process.env.ANTHROPIC_API_KEY && process.env.ANTHROPIC_API_KEY !== 'MY_API_KEY'
-            ? 'anthropic'
-            : 'gemini')
-      : 'mock';
-  }
-
   const effectiveLimit = options.limit !== undefined && options.limit > 0 ? Math.floor(options.limit) : undefined;
-  const liveProfile = buildLiveGeminiToolProfile(options.model);
-  const provider: ProviderProfile = liveMode
-    ? liveProfile
-    : {
-        name: hasLiveApiKey ? `live_${providerType}` : 'eval_mock',
-        type: providerType,
-        api_key_env: providerType === 'openai' ? 'OPENAI_API_KEY' : providerType === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'GEMINI_API_KEY',
-        default_model:
-          options.model ||
-          (providerType === 'openai'
-            ? 'gpt-4o-mini'
-            : providerType === 'anthropic'
-              ? 'claude-3-5-haiku-20241022'
-              : providerType === 'gemini'
-                ? 'gemini-2.5-flash'
-                : 'mock-model'),
-        cheap_model: providerType === 'openai' ? 'gpt-4o-mini' : providerType === 'anthropic' ? 'claude-3-5-haiku-20241022' : providerType === 'gemini' ? 'gemini-2.5-flash-lite' : 'mock-model',
-        reasoning_model: providerType === 'openai' ? 'o3-mini' : providerType === 'anthropic' ? 'claude-3-7-sonnet-20250219' : providerType === 'gemini' ? 'gemini-2.5-pro' : 'mock-model',
-        supports_reasoning_effort: true,
-        supports_logprobs: false,
-        input_cost_per_million: 0.10,
-        output_cost_per_million: 0.40,
-        reasoning_cost_per_million: 0.40,
-      };
 
   const projected = projectToolEvalCost(provider, effectiveLimit);
-  if (liveMode || options.maxCostUsd !== undefined) {
-    assertWithinSpendingGuard(projected.projectedCostUsd, maxCostUsd, 'tool_eval_suite:preflight');
-  }
+  assertWithinSpendingGuard(projected.projectedCostUsd, maxCostUsd, 'tool_eval_suite:preflight');
 
   const llm = new LLMClient(provider);
   const toolDc = new ToolDCEngine(registry, sandbox, llm, logStore);
   const testCases = effectiveLimit !== undefined ? TOOL_EVAL_TEST_CASES.slice(0, effectiveLimit) : TOOL_EVAL_TEST_CASES;
 
-  // Specific dry-run catch scenarios: wrong tools or invalid argument payloads
   const catchScenarios = [
     {
       query: 'Read non-existent file /workspace/ghost_file.txt',
@@ -229,18 +199,40 @@ export async function runToolEvalSuite(
   let totalSelectionRetries = 0;
   let dryRunCatches = 0;
   let cumulativeCostUsd = 0;
+  let aelInputTokens = 0;
+  let aelOutputTokens = 0;
+  let aelReasoningTokens = 0;
+  let aelTotalTokens = 0;
+  let baselineSchemaTokensSum = 0;
+  let validSelectionSamples = 0;
+  let verifierErrors = 0;
 
-  // Run standard selection test cases (10 cases)
   for (const tc of testCases) {
     const approval = tc.expected_tool === 'fin_transfer_funds';
     const res = await toolDc.selectAndExecute(tc.query, {
       workflow_id: 'tool_eval',
       human_approval_granted: approval,
     });
-    cumulativeCostUsd += res.overhead_cost_usd;
-    if (liveMode || options.maxCostUsd !== undefined) {
-      assertWithinSpendingGuard(cumulativeCostUsd, maxCostUsd, 'tool_eval_suite:runtime');
+
+    if (res.provider_source && (res.provider_source === 'unit_test' || res.usage_source !== 'provider_reported')) {
+      throw new Error(
+        `[AEL Benchmark Integrity Error] Unit-test double detected in Tool-DC benchmark (provider_source=${res.provider_source}, usage_source=${res.usage_source}).`
+      );
     }
+
+    cumulativeCostUsd += res.overhead_cost_usd;
+    assertWithinSpendingGuard(cumulativeCostUsd, maxCostUsd, 'tool_eval_suite:runtime');
+
+    aelInputTokens += res.overhead_input_tokens;
+    aelOutputTokens += res.overhead_output_tokens;
+    aelReasoningTokens += res.overhead_reasoning_tokens;
+    aelTotalTokens += res.overhead_tokens;
+    baselineSchemaTokensSum += res.baseline_tokens;
+
+    if (!res.error || res.tool_name !== null || res.overhead_tokens > 0) {
+      validSelectionSamples++;
+    }
+
     const passed = res.success && res.tool_name === tc.expected_tool;
     if (passed) successfulCount++;
     totalSelectionRetries += res.retries;
@@ -257,7 +249,6 @@ export async function runToolEvalSuite(
     });
   }
 
-  // Run dry-run safety catch scenarios (3 cases)
   const { baselineTokens, baselineCostUsd } = toolDc.computeRegistryBaseline();
   for (const cs of catchScenarios) {
     let badTool: string = 'fs_read_file';
@@ -313,6 +304,7 @@ export async function runToolEvalSuite(
         error: dryRun.error,
       });
     } else {
+      verifierErrors++;
       results.push({
         case_type: 'dry_run_catch',
         query: cs.query,
@@ -329,37 +321,89 @@ export async function runToolEvalSuite(
   const totalCases = results.length;
   const selectionCasesTotal = testCases.length;
   const dryRunCatchCasesTotal = catchScenarios.length;
-  const accuracy = Number((successfulCount / selectionCasesTotal).toFixed(3));
-  const averageRetries = Number((totalSelectionRetries / selectionCasesTotal).toFixed(2));
-  const passedThresholds = accuracy >= 0.90 && dryRunCatches >= 3;
-  const providerSource = hasLiveApiKey ? providerType : 'mock_simulator';
-  const acceptanceStatus = hasLiveApiKey
-    ? (passedThresholds ? 'PASS' : 'NOT VALIDATED (Thresholds not reached)')
-    : 'NOT VALIDATED (No live upstream API credentials configured)';
+  const accuracy = selectionCasesTotal > 0 ? Number((successfulCount / selectionCasesTotal).toFixed(3)) : 0;
+  const averageRetries = selectionCasesTotal > 0 ? Number((totalSelectionRetries / selectionCasesTotal).toFixed(2)) : 0;
 
+  const passedThresholds =
+    validSelectionSamples > 0 &&
+    verifierErrors === 0 &&
+    aelTotalTokens > 0 &&
+    accuracy >= BENCHMARK_QUALITY_FLOORS.tool_selection_accuracy &&
+    dryRunCatches >= BENCHMARK_QUALITY_FLOORS.tool_dry_run_catches;
+
+  const acceptanceStatus = passedThresholds ? 'PASS' : 'FAIL (Thresholds or verifiers not satisfied)';
   const now = new Date();
   const dateStr = now.toISOString().split('T')[0];
 
-  const cmdParts = ['npx tsx bin/ael.ts eval --suite tool'];
-  if (liveMode) cmdParts.push('--live');
+  const cmdParts = [`npx tsx bin/ael.ts eval --suite tool --provider ${provider.type}`];
   if (options.model) cmdParts.push(`--model ${options.model}`);
   if (effectiveLimit !== undefined) cmdParts.push(`--limit ${effectiveLimit}`);
 
+  const datasetHash = computeDatasetHash({ selection_cases: testCases, catch_scenarios: catchScenarios });
+
   const evalResult: ToolEvalResult = {
     suite_name: 'Tool-DC Verification & Safety Suite',
+    source: 'live_provider',
+    provider: provider.type as LiveProviderType,
+    provider_source: provider.type,
+    model: provider.default_model,
+    credential_status: credentialStatus,
+    split: 'tool_selection_held_out',
+    dataset_version: TOOL_EVAL_DATASET_VERSION,
+    dataset_hash: datasetHash,
     timestamp: now.toISOString(),
     execution_date: dateStr,
     run_command: cmdParts.join(' '),
-    live_api_credentials_present: hasLiveApiKey,
-    provider_source: providerSource,
-    model: provider.default_model,
+    live_api_credentials_present: true,
+    model_config: {
+      default_model: provider.default_model,
+      cheap_model: provider.cheap_model,
+      reasoning_model: provider.reasoning_model,
+      supports_reasoning_effort: provider.supports_reasoning_effort,
+      supports_logprobs: provider.supports_logprobs,
+    },
     sample_size: {
       selection_cases: selectionCasesTotal,
       dry_run_catch_cases: dryRunCatchCasesTotal,
       total_cases: totalCases,
+      valid_samples: validSelectionSamples + dryRunCatches,
       limit_per_category: effectiveLimit ?? null,
       full_selection_cases: TOOL_EVAL_TEST_CASES.length,
     },
+    token_usage: {
+      ael_input_tokens: aelInputTokens,
+      ael_output_tokens: aelOutputTokens,
+      ael_reasoning_tokens: aelReasoningTokens,
+      ael_total_tokens: aelTotalTokens,
+      baseline_schema_tokens: baselineSchemaTokensSum,
+      usage_source: 'provider_reported',
+    },
+    verifier_results: {
+      total_verifications: totalCases,
+      passed: successfulCount + dryRunCatches,
+      failed: selectionCasesTotal - successfulCount + (dryRunCatchCasesTotal - dryRunCatches - verifierErrors),
+      errored: verifierErrors,
+      methods: ['tool_name_exact_match', 'dry_run_sandbox_catch'],
+    },
+    accuracy_metrics: {
+      selection_correct: successfulCount,
+      selection_total: selectionCasesTotal,
+      selection_accuracy: accuracy,
+      dry_run_catches: dryRunCatches,
+      dry_run_catches_total: dryRunCatchCasesTotal,
+      quality_floor: BENCHMARK_QUALITY_FLOORS.tool_selection_accuracy,
+    },
+    cost_methodology: {
+      billing_basis: 'estimated_from_provider_usage_and_profile_rates',
+      provider_billed_cost_reported: false,
+      usage_source: 'provider_reported',
+      currency: 'USD',
+      input_cost_per_million: provider.input_cost_per_million,
+      output_cost_per_million: provider.output_cost_per_million,
+      reasoning_cost_per_million: provider.reasoning_cost_per_million,
+      verification_cost_excluded_from_product_savings: true,
+    },
+    savings_claims_valid: passedThresholds,
     acceptance_status: acceptanceStatus,
     total_cases: totalCases,
     selection_cases_total: selectionCasesTotal,
@@ -379,7 +423,7 @@ export async function runToolEvalSuite(
   if (!fs.existsSync(resultsDir)) {
     fs.mkdirSync(resultsDir, { recursive: true });
   }
-  const fileName = liveMode ? `${dateStr}_live_tool_selection.json` : `${dateStr}_tool_selection.json`;
+  const fileName = `${dateStr}_live_tool_selection.json`;
   const evidenceFile = path.join(resultsDir, fileName);
   fs.writeFileSync(evidenceFile, JSON.stringify(evalResult, null, 2), 'utf8');
 

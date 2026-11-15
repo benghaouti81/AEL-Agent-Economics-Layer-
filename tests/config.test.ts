@@ -33,11 +33,24 @@ describe('Config System & Presets', () => {
     expect(DEFAULT_PRESETS.latency_capped.max_latency_ms).toBe(2000);
   });
 
-  it('rejects invalid configurations violating constraints', () => {
+  it('rejects invalid configurations violating constraints and rejects removed mock provider type', () => {
     expect(() =>
       AelConfigSchema.parse({
         port: -1,
         active_preset: 'invalid_preset',
+      })
+    ).toThrow();
+
+    expect(() =>
+      AelConfigSchema.parse({
+        provider: {
+          name: 'removed-mock',
+          type: 'mock',
+          api_key_env: 'KEY',
+          default_model: 'mock',
+          cheap_model: 'mock',
+          reasoning_model: 'mock',
+        },
       })
     ).toThrow();
   });

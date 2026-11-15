@@ -1,5 +1,6 @@
 /**
  * Unit Tests: Tool-DC Engine & Dry-Run Sandbox
+ * Uses an isolated unit-test LLM double (never generates benchmark reports or performance evidence).
  * @license Apache-2.0
  */
 
@@ -11,6 +12,7 @@ import { LLMClient } from '../src/llm/client.js';
 import { DecisionLogStore } from '../src/db/decision_log.js';
 import { FILESYSTEM_TOOLS, MockFilesystemServer } from '../evals/mock_servers/filesystem_server.js';
 import { DESTRUCTIVE_TOOLS, MockDestructiveServer } from '../evals/mock_servers/destructive_server.js';
+import { createUnitTestLLMClient } from './helpers/test_llm_double.js';
 
 describe('Tool-DC Engine & Dry-Run Sandbox', () => {
   let registry: ToolRegistry;
@@ -20,7 +22,6 @@ describe('Tool-DC Engine & Dry-Run Sandbox', () => {
   let engine: ToolDCEngine;
 
   beforeEach(() => {
-    process.env.AEL_ALLOW_MOCK = '1';
     registry = new ToolRegistry([...FILESYSTEM_TOOLS, ...DESTRUCTIVE_TOOLS]);
     sandbox = new DryRunSandbox();
     const fsServer = new MockFilesystemServer();
@@ -29,19 +30,7 @@ describe('Tool-DC Engine & Dry-Run Sandbox', () => {
     sandbox.registerExecutor('destructive', (name, args, dry) => destServer.execute(name, args, dry));
 
     logStore = new DecisionLogStore(':memory:');
-    llm = new LLMClient({
-      name: 'mock',
-      type: 'mock',
-      api_key_env: 'GEMINI_API_KEY',
-      default_model: 'mock',
-      cheap_model: 'mock',
-      reasoning_model: 'mock',
-      supports_reasoning_effort: true,
-      supports_logprobs: false,
-      input_cost_per_million: 0.1,
-      output_cost_per_million: 0.4,
-      reasoning_cost_per_million: 0.4,
-    });
+    llm = createUnitTestLLMClient();
     engine = new ToolDCEngine(registry, sandbox, llm, logStore);
   });
 

@@ -12,6 +12,7 @@ import { DecisionLogStore } from '../src/db/decision_log.js';
 import { FILESYSTEM_TOOLS, MockFilesystemServer } from '../evals/mock_servers/filesystem_server.js';
 import { SEARCH_TOOLS, MockSearchServer } from '../evals/mock_servers/search_server.js';
 import { DESTRUCTIVE_TOOLS, MockDestructiveServer } from '../evals/mock_servers/destructive_server.js';
+import { createUnitTestLLMClient } from './helpers/test_llm_double.js';
 
 describe('Tool-DC Extended Features', () => {
   let registry: ToolRegistry;
@@ -21,7 +22,6 @@ describe('Tool-DC Extended Features', () => {
   let engine: ToolDCEngine;
 
   beforeEach(() => {
-    process.env.AEL_ALLOW_MOCK = '1';
     registry = new ToolRegistry([...FILESYSTEM_TOOLS, ...SEARCH_TOOLS, ...DESTRUCTIVE_TOOLS]);
     sandbox = new DryRunSandbox();
     const fs = new MockFilesystemServer();
@@ -32,18 +32,8 @@ describe('Tool-DC Extended Features', () => {
     sandbox.registerExecutor('destructive', (n, a, d) => destructive.execute(n, a, d));
 
     logStore = new DecisionLogStore(':memory:');
-    llm = new LLMClient({
-      name: 'mock',
-      type: 'mock',
-      api_key_env: 'KEY',
-      default_model: 'mock',
-      cheap_model: 'mock',
-      reasoning_model: 'mock',
-      supports_reasoning_effort: true,
+    llm = createUnitTestLLMClient({
       supports_logprobs: true,
-      input_cost_per_million: 0.1,
-      output_cost_per_million: 0.4,
-      reasoning_cost_per_million: 0.4,
     });
 
     engine = new ToolDCEngine(registry, sandbox, llm, logStore);
@@ -152,9 +142,10 @@ describe('Tool-DC Extended Features', () => {
       total_tokens: 20,
       cost_usd: 0.00001,
       latency_ms: 5,
-      model: 'mock',
+      model: 'unit-test-double',
       confidence_source: 'unavailable',
-      provider_source: 'mock_simulator',
+      provider_source: 'unit_test',
+      usage_source: 'unit_test',
     });
 
     const sync1 = await engine.selectAndExecute('Sync idempotent record rec_1');
