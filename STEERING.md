@@ -168,6 +168,17 @@ Every reply ends with one of: (a) commit SHAs + push output + Actions run
 URL, (b) "NOT DONE: <reason>" + raw error, or (c) a specific question if
 genuinely blocked. Nothing else counts as progress.
 
+P0-21 (live-eval feasibility on free tier):
+a) src/llm/client.ts: on 429 RESOURCE_EXHAUSTED, parse the RetryInfo delay
+and retry with exponential backoff (max 5 attempts), logging each backoff;
+fail cleanly only after exhausting retries.
+b) bin/ael.ts + eval suites: add --limit N to cap tasks per category for a
+run; the cap must be recorded in the results JSON (sample_size + model used).
+c) .github/workflows/live-eval.yml: default the live run to
+gemini-2.5-flash-lite (15 RPM free tier) with --limit 5 per category, keeping
+the $1.00 guard and 15m timeout; results must state the model and sample
+explicitly. Full 200-task runs stay available via parameters for paid keys.
+
 ## 8. ENVIRONMENT NOTES
 - Local container may lack build toolchains; if npm native builds fail,
   install build-essential via apt if available, otherwise use
