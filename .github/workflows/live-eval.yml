@@ -2,6 +2,22 @@ name: AEL Live Evaluation (Gemini)
 
 on:
   workflow_dispatch:
+    inputs:
+      model:
+        description: 'Gemini model ID (default: gemini-2.5-flash-lite for 15 RPM free tier)'
+        required: false
+        default: 'gemini-2.5-flash-lite'
+        type: string
+      limit_per_category:
+        description: 'Max tasks per category (default: 5 for free tier; 0 runs full 200-task held_out suite on paid keys)'
+        required: false
+        default: '5'
+        type: string
+      max_cost_usd:
+        description: 'Spending guard cap in USD (default: 1.0)'
+        required: false
+        default: '1.0'
+        type: string
   push:
     tags:
       - 'v*'
@@ -14,6 +30,10 @@ jobs:
     name: Live Gemini Evaluation (Budget Held-Out + Tool-DC)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      EVAL_MODEL: ${{ inputs.model || 'gemini-2.5-flash-lite' }}
+      EVAL_LIMIT: ${{ inputs.limit_per_category || '5' }}
+      EVAL_MAX_COST_USD: ${{ inputs.max_cost_usd || '1.0' }}
 
     steps:
       - name: Checkout repository
@@ -38,25 +58,27 @@ jobs:
           fi
           echo "::add-mask::$GEMINI_API_KEY"
 
-      - name: Spending guard preflight (abort if projected cost > $1.00)
+      - name: Spending guard preflight (abort if projected cost > cap)
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           AEL_LIVE_EVAL: '1'
-        run: npx tsx bin/ael.ts eval --suite all --split held_out --live --max-cost-usd 1.0 --preflight-only
+        run: |
+          echo "Live eval configuration: model=${EVAL_MODEL}, limit_per_category=${EVAL_LIMIT}, max_cost_usd=${EVAL_MAX_COST_USD}"
+          npx tsx bin/ael.ts eval --suite all --split held_out --live --model "$EVAL_MODEL" --limit "$EVAL_LIMIT" --max-cost-usd "$EVAL_MAX_COST_USD" --preflight-only
 
       - name: Run Thinking Budget suite live (held_out)
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           AEL_LIVE_EVAL: '1'
-        run: npx tsx bin/ael.ts eval --suite budget --split held_out --live --max-cost-usd 1.0 --db /tmp/live_eval.db
+        run: npx tsx bin/ael.ts eval --suite budget --split held_out --live --model "$EVAL_MODEL" --limit "$EVAL_LIMIT" --max-cost-usd "$EVAL_MAX_COST_USD" --db /tmp/live_eval.db
 
       - name: Run Tool-DC suite live
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           AEL_LIVE_EVAL: '1'
-        run: npx tsx bin/ael.ts eval --suite tool --live --max-cost-usd 1.0 --db /tmp/live_eval.db
+        run: npx tsx bin/ael.ts eval --suite tool --live --model "$EVAL_MODEL" --limit "$EVAL_LIMIT" --max-cost-usd "$EVAL_MAX_COST_USD" --db /tmp/live_eval.db
 
-      - name: Verify live result files and provider_source
+      - name: Verify live result files, model, sample_size, and provider_source
         run: |
           RUN_DATE=$(date -u +%Y-%m-%d)
           node -e "
@@ -67,7 +89,10 @@ jobs:
               if (data.provider_source !== 'gemini') {
                 throw new Error(f + ' has provider_source=' + data.provider_source + ' (expected gemini)');
               }
-              console.log('Verified', f, 'provider_source=' + data.provider_source, 'status=' + data.acceptance_status);
+              if (!data.model || !data.sample_size) {
+                throw new Error(f + ' must explicitly record model and sample_size');
+              }
+              console.log('Verified', f, 'provider_source=' + data.provider_source, 'model=' + data.model, 'sample_size=' + JSON.stringify(data.sample_size), 'status=' + data.acceptance_status);
             }
           "
 
@@ -81,7 +106,7 @@ jobs:
             echo "No changes to live evaluation result files."
             exit 0
           fi
-          git commit -m "eval(live): record Gemini live evaluation results (${RUN_DATE})"
+          git commit -m "eval(live): record Gemini live evaluation results (${RUN_DATE}, ${EVAL_MODEL}, limit=${EVAL_LIMIT})"
           if git symbolic-ref -q HEAD >/dev/null; then
             git push
           else

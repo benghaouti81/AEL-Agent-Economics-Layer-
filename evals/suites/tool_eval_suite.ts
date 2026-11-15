@@ -29,6 +29,8 @@ import {
 export interface ToolEvalOptions {
   live?: boolean;
   maxCostUsd?: number;
+  limit?: number;
+  model?: string;
 }
 
 export interface ToolEvalResult {
@@ -38,6 +40,14 @@ export interface ToolEvalResult {
   run_command: string;
   live_api_credentials_present: boolean;
   provider_source: string;
+  model: string;
+  sample_size: {
+    selection_cases: number;
+    dry_run_catch_cases: number;
+    total_cases: number;
+    limit_per_category: number | null;
+    full_selection_cases: number;
+  };
   acceptance_status:
     | 'PASS'
     | 'NOT VALIDATED (No live upstream API credentials configured)'
@@ -77,25 +87,39 @@ const TOOL_EVAL_TEST_CASES = [
   { query: 'Read file /workspace/src/index.ts source code', expected_tool: 'fs_read_file' },
 ];
 
-export function buildLiveGeminiToolProfile(): ProviderProfile {
+function getToolGeminiPricingForModel(model: string): { input: number; output: number; reasoning: number } {
+  if (/2\.5-pro/i.test(model)) {
+    return { input: 1.25, output: 10.0, reasoning: 10.0 };
+  }
+  return { input: 0.10, output: 0.40, reasoning: 0.40 };
+}
+
+export function buildLiveGeminiToolProfile(model?: string): ProviderProfile {
+  const resolvedModel = (model || process.env.AEL_LIVE_MODEL || 'gemini-2.5-flash').trim();
+  const pricing = getToolGeminiPricingForModel(resolvedModel);
   return {
     name: 'live_gemini',
     type: 'gemini',
     api_key_env: 'GEMINI_API_KEY',
-    default_model: 'gemini-2.5-flash',
+    default_model: resolvedModel,
     cheap_model: 'gemini-2.5-flash-lite',
     reasoning_model: 'gemini-2.5-pro',
     supports_reasoning_effort: true,
     supports_logprobs: false,
-    input_cost_per_million: 0.10,
-    output_cost_per_million: 0.40,
-    reasoning_cost_per_million: 0.40,
+    input_cost_per_million: pricing.input,
+    output_cost_per_million: pricing.output,
+    reasoning_cost_per_million: pricing.reasoning,
   };
 }
 
-export function projectToolEvalCost(provider: ProviderProfile = buildLiveGeminiToolProfile()) {
+export function projectToolEvalCost(
+  provider: ProviderProfile = buildLiveGeminiToolProfile(),
+  limitPerCategory?: number
+) {
+  const cap = limitPerCategory !== undefined && limitPerCategory > 0 ? Math.floor(limitPerCategory) : undefined;
+  const cases = cap !== undefined ? TOOL_EVAL_TEST_CASES.slice(0, cap) : TOOL_EVAL_TEST_CASES;
   return estimateProjectedEvalCost({
-    queries: TOOL_EVAL_TEST_CASES.map(t => t.query),
+    queries: cases.map(t => t.query),
     promptOverheadCharsPerCall: 1400,
     callsPerQuery: 2,
     estimatedOutputTokensPerCall: 250,
@@ -149,13 +173,23 @@ export async function runToolEvalSuite(
       : 'mock';
   }
 
+  const effectiveLimit = options.limit !== undefined && options.limit > 0 ? Math.floor(options.limit) : undefined;
+  const liveProfile = buildLiveGeminiToolProfile(options.model);
   const provider: ProviderProfile = liveMode
-    ? buildLiveGeminiToolProfile()
+    ? liveProfile
     : {
         name: hasLiveApiKey ? `live_${providerType}` : 'eval_mock',
         type: providerType,
         api_key_env: providerType === 'openai' ? 'OPENAI_API_KEY' : providerType === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'GEMINI_API_KEY',
-        default_model: providerType === 'openai' ? 'gpt-4o-mini' : providerType === 'anthropic' ? 'claude-3-5-haiku-20241022' : providerType === 'gemini' ? 'gemini-2.5-flash' : 'mock-model',
+        default_model:
+          options.model ||
+          (providerType === 'openai'
+            ? 'gpt-4o-mini'
+            : providerType === 'anthropic'
+              ? 'claude-3-5-haiku-20241022'
+              : providerType === 'gemini'
+                ? 'gemini-2.5-flash'
+                : 'mock-model'),
         cheap_model: providerType === 'openai' ? 'gpt-4o-mini' : providerType === 'anthropic' ? 'claude-3-5-haiku-20241022' : providerType === 'gemini' ? 'gemini-2.5-flash-lite' : 'mock-model',
         reasoning_model: providerType === 'openai' ? 'o3-mini' : providerType === 'anthropic' ? 'claude-3-7-sonnet-20250219' : providerType === 'gemini' ? 'gemini-2.5-pro' : 'mock-model',
         supports_reasoning_effort: true,
@@ -165,14 +199,14 @@ export async function runToolEvalSuite(
         reasoning_cost_per_million: 0.40,
       };
 
-  const projected = projectToolEvalCost(provider);
+  const projected = projectToolEvalCost(provider, effectiveLimit);
   if (liveMode || options.maxCostUsd !== undefined) {
     assertWithinSpendingGuard(projected.projectedCostUsd, maxCostUsd, 'tool_eval_suite:preflight');
   }
 
   const llm = new LLMClient(provider);
   const toolDc = new ToolDCEngine(registry, sandbox, llm, logStore);
-  const testCases = TOOL_EVAL_TEST_CASES;
+  const testCases = effectiveLimit !== undefined ? TOOL_EVAL_TEST_CASES.slice(0, effectiveLimit) : TOOL_EVAL_TEST_CASES;
 
   // Specific dry-run catch scenarios: wrong tools or invalid argument payloads
   const catchScenarios = [
@@ -306,13 +340,26 @@ export async function runToolEvalSuite(
   const now = new Date();
   const dateStr = now.toISOString().split('T')[0];
 
+  const cmdParts = ['npx tsx bin/ael.ts eval --suite tool'];
+  if (liveMode) cmdParts.push('--live');
+  if (options.model) cmdParts.push(`--model ${options.model}`);
+  if (effectiveLimit !== undefined) cmdParts.push(`--limit ${effectiveLimit}`);
+
   const evalResult: ToolEvalResult = {
     suite_name: 'Tool-DC Verification & Safety Suite',
     timestamp: now.toISOString(),
     execution_date: dateStr,
-    run_command: liveMode ? 'npx tsx bin/ael.ts eval --suite tool --live' : 'npx tsx bin/ael.ts eval --suite tool',
+    run_command: cmdParts.join(' '),
     live_api_credentials_present: hasLiveApiKey,
     provider_source: providerSource,
+    model: provider.default_model,
+    sample_size: {
+      selection_cases: selectionCasesTotal,
+      dry_run_catch_cases: dryRunCatchCasesTotal,
+      total_cases: totalCases,
+      limit_per_category: effectiveLimit ?? null,
+      full_selection_cases: TOOL_EVAL_TEST_CASES.length,
+    },
     acceptance_status: acceptanceStatus,
     total_cases: totalCases,
     selection_cases_total: selectionCasesTotal,

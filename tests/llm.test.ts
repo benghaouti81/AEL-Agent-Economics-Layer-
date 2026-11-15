@@ -4,7 +4,11 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { LLMClient } from '../src/llm/client.js';
+import {
+  LLMClient,
+  isGeminiRateLimitError,
+  parseGeminiRetryInfoMs,
+} from '../src/llm/client.js';
 
 describe('LLMClient Adapter Layer', () => {
   const originalAllowMock = process.env.AEL_ALLOW_MOCK;
@@ -466,7 +470,7 @@ describe('LLMClient Adapter Layer', () => {
           candidatesTokenCount: 50,
         },
       });
-      const withoutThoughts = await client.complete('Simple query', { reasoning_effort: 'none' });
+      const withoutThoughts = await geminiClientOrFallback(client);
       expect(withoutThoughts.reasoning_tokens).toBe(0);
       expect(withoutThoughts.total_tokens).toBe(250);
       expect(withoutThoughts.cost_usd).toBe(client.calculateCost(200, 50, 0));
@@ -474,4 +478,84 @@ describe('LLMClient Adapter Layer', () => {
       delete process.env.GEMINI_API_KEY;
     }
   });
+
+  it('parses RetryInfo and retries Gemini 429 RESOURCE_EXHAUSTED with exponential backoff up to 5 attempts, failing cleanly on exhaustion (P0-21)', async () => {
+    expect(parseGeminiRetryInfoMs({ details: [{ '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '12s' }] })).toBe(12000);
+    expect(parseGeminiRetryInfoMs(new Error('got status: 429 {"error":{"code":429,"status":"RESOURCE_EXHAUSTED","details":[{"retryDelay":"4.5s"}]}}'))).toBe(4500);
+    expect(parseGeminiRetryInfoMs(new Error('Quota exceeded. Please retry in 3.2s.'))).toBe(3200);
+    expect(isGeminiRateLimitError({ status: 429 })).toBe(true);
+    expect(isGeminiRateLimitError(new Error('RESOURCE_EXHAUSTED'))).toBe(true);
+    expect(isGeminiRateLimitError(new Error('400 INVALID_ARGUMENT'))).toBe(false);
+
+    vi.useFakeTimers();
+    process.env.GEMINI_API_KEY = 'gem-test-123';
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      const client = new LLMClient({
+        name: 'gemini_retry_test',
+        type: 'gemini',
+        api_key_env: 'GEMINI_API_KEY',
+        default_model: 'gemini-2.5-flash-lite',
+        cheap_model: 'gemini-2.5-flash-lite',
+        reasoning_model: 'gemini-2.5-pro',
+        supports_reasoning_effort: true,
+        supports_logprobs: false,
+        input_cost_per_million: 0.10,
+        output_cost_per_million: 0.40,
+        reasoning_cost_per_million: 0.40,
+      });
+
+      // Case 1: Recovers after 2 transient 429 errors (1st with RetryInfo=3s, 2nd with exponential 2s)
+      const recoverSpy = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('429 RESOURCE_EXHAUSTED {"details":[{"retryDelay":"3s"}]}'))
+        .mockRejectedValueOnce(Object.assign(new Error('429 Too Many Requests'), { status: 429 }))
+        .mockResolvedValueOnce({
+          text: 'recovered after backoff',
+          usageMetadata: { promptTokenCount: 20, candidatesTokenCount: 5 },
+        });
+      (client as any).geminiClient = { models: { generateContent: recoverSpy } };
+
+      const recoverPromise = client.complete('retry test');
+      await vi.advanceTimersByTimeAsync(3000);
+      await vi.advanceTimersByTimeAsync(2000);
+      const recovered = await recoverPromise;
+      expect(recovered.text).toBe('recovered after backoff');
+      expect(recoverSpy).toHaveBeenCalledTimes(3);
+      expect(warnSpy).toHaveBeenCalledTimes(2);
+      expect(warnSpy.mock.calls[0][0]).toContain('RetryInfo=3000ms');
+      expect(warnSpy.mock.calls[0][0]).toContain('3000ms');
+      expect(warnSpy.mock.calls[1][0]).toContain('2000ms');
+
+      warnSpy.mockClear();
+
+      // Case 2: Fails cleanly after 5 attempts when 429 persists
+      const exhaustSpy = vi.fn().mockRejectedValue(
+        Object.assign(new Error('429 RESOURCE_EXHAUSTED quota still exhausted'), { status: 429 })
+      );
+      (client as any).geminiClient = { models: { generateContent: exhaustSpy } };
+
+      const exhaustPromise = client.complete('exhaust test').catch(err => err);
+      await vi.advanceTimersByTimeAsync(1000 + 2000 + 4000 + 8000);
+      const exhaustErr = await exhaustPromise;
+      expect(exhaustErr).toBeInstanceOf(Error);
+      expect(exhaustErr.message).toMatch(/exhausted after 5 attempts/i);
+      expect(exhaustSpy).toHaveBeenCalledTimes(5);
+      expect(warnSpy).toHaveBeenCalledTimes(4);
+
+      // Case 3: Non-429 errors fail immediately without retry
+      const nonRetrySpy = vi.fn().mockRejectedValue(Object.assign(new Error('400 Bad Request'), { status: 400 }));
+      (client as any).geminiClient = { models: { generateContent: nonRetrySpy } };
+      await expect(client.complete('non-retry test')).rejects.toThrow(/400 Bad Request/);
+      expect(nonRetrySpy).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+      delete process.env.GEMINI_API_KEY;
+    }
+  });
 });
+
+async function geminiClientOrFallback(client: LLMClient) {
+  return await client.complete('Simple query', { reasoning_effort: 'none' });
+}

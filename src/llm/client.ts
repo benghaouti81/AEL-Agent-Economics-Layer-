@@ -32,6 +32,94 @@ export interface LLMResponse {
   provider_source: 'openai' | 'anthropic' | 'gemini' | 'mock_simulator';
 }
 
+export const MAX_GEMINI_RATE_LIMIT_ATTEMPTS = 5;
+export const BASE_GEMINI_RETRY_DELAY_MS = 1000;
+
+export function isGeminiRateLimitError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') {
+    const str = String(err || '');
+    return /\b429\b/.test(str) || /RESOURCE_EXHAUSTED/i.test(str);
+  }
+  const e = err as Record<string, any>;
+  if (e.status === 429 || e.code === 429 || e.response?.status === 429 || e.error?.code === 429) {
+    return true;
+  }
+  if (e.status === 'RESOURCE_EXHAUSTED' || e.error?.status === 'RESOURCE_EXHAUSTED') {
+    return true;
+  }
+  const message = String(e.message || '');
+  return /\b429\b/.test(message) || /RESOURCE_EXHAUSTED/i.test(message);
+}
+
+function parseDelayStringToMs(raw: unknown): number | null {
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 0) {
+    return Math.ceil(raw * 1000);
+  }
+  if (raw && typeof raw === 'object') {
+    const obj = raw as Record<string, any>;
+    const seconds = typeof obj.seconds === 'number' ? obj.seconds : Number(obj.seconds || 0);
+    const nanos = typeof obj.nanos === 'number' ? obj.nanos : Number(obj.nanos || 0);
+    if (Number.isFinite(seconds) && Number.isFinite(nanos) && (seconds > 0 || nanos > 0)) {
+      return Math.ceil(seconds * 1000 + nanos / 1_000_000);
+    }
+    return null;
+  }
+  if (typeof raw !== 'string') return null;
+  const match = raw.trim().match(/^(\d+(?:\.\d+)?)\s*(ms|milliseconds?|s|sec|seconds?)?$/i);
+  if (!match) return null;
+  const value = Number(match[1]);
+  if (!Number.isFinite(value) || value < 0) return null;
+  const unit = (match[2] || 's').toLowerCase();
+  if (unit === 'ms' || unit.startsWith('millisecond')) {
+    return Math.ceil(value);
+  }
+  return Math.ceil(value * 1000);
+}
+
+export function parseGeminiRetryInfoMs(err: unknown): number | null {
+  if (!err) return null;
+
+  // 1. Inspect structured RetryInfo details arrays if exposed on the error object
+  const candidateDetails: any[] = [];
+  if (typeof err === 'object') {
+    const e = err as Record<string, any>;
+    if (Array.isArray(e.details)) candidateDetails.push(...e.details);
+    if (Array.isArray(e.errorDetails)) candidateDetails.push(...e.errorDetails);
+    if (Array.isArray(e.error?.details)) candidateDetails.push(...e.error.details);
+    if (Array.isArray(e.response?.data?.error?.details)) candidateDetails.push(...e.response.data.error.details);
+  }
+  for (const item of candidateDetails) {
+    if (item && typeof item === 'object' && item.retryDelay !== undefined) {
+      const parsed = parseDelayStringToMs(item.retryDelay);
+      if (parsed !== null) return parsed;
+    }
+  }
+
+  // 2. Inspect text / embedded JSON payload in error message
+  const msg = err instanceof Error ? err.message : typeof err === 'string' ? err : JSON.stringify(err);
+  const patterns: RegExp[] = [
+    /"retryDelay"\s*:\s*"(\d+(?:\.\d+)?(?:ms|s))"/i,
+    /retryDelay\s*[:=]\s*["']?(\d+(?:\.\d+)?(?:ms|s))["']?/i,
+    /Please retry in\s+(\d+(?:\.\d+)?)\s*(ms|milliseconds?|s|seconds?)/i,
+    /retry(?:\s+after|\s+in)\s+(\d+(?:\.\d+)?)\s*(ms|milliseconds?|s|seconds?)/i,
+  ];
+
+  for (const regex of patterns) {
+    const m = msg.match(regex);
+    if (m) {
+      if (m[2]) {
+        const parsed = parseDelayStringToMs(`${m[1]}${m[2]}`);
+        if (parsed !== null) return parsed;
+      } else if (m[1]) {
+        const parsed = parseDelayStringToMs(m[1]);
+        if (parsed !== null) return parsed;
+      }
+    }
+  }
+
+  return null;
+}
+
 export class LLMClient {
   private geminiClient: GoogleGenAI | null = null;
   private geminiInitError: Error | null = null;
@@ -281,11 +369,40 @@ export class LLMClient {
       config.thinkingConfig = this.buildGeminiThinkingConfig(model, options.reasoning_effort);
     }
 
-    const response = await this.geminiClient!.models.generateContent({
-      model,
-      contents: prompt,
-      config,
-    });
+    let response: any;
+    let lastRateLimitError: unknown;
+    for (let attempt = 1; attempt <= MAX_GEMINI_RATE_LIMIT_ATTEMPTS; attempt++) {
+      try {
+        response = await this.geminiClient!.models.generateContent({
+          model,
+          contents: prompt,
+          config,
+        });
+        break;
+      } catch (err: unknown) {
+        if (!isGeminiRateLimitError(err)) {
+          throw err;
+        }
+        lastRateLimitError = err;
+        if (attempt >= MAX_GEMINI_RATE_LIMIT_ATTEMPTS) {
+          const msg = err instanceof Error ? err.message : String(err);
+          throw new Error(
+            `[AEL LLM] Gemini 429 RESOURCE_EXHAUSTED exhausted after ${MAX_GEMINI_RATE_LIMIT_ATTEMPTS} attempts: ${msg}`
+          );
+        }
+
+        const retryInfoMs = parseGeminiRetryInfoMs(err);
+        const expBackoffMs = BASE_GEMINI_RETRY_DELAY_MS * Math.pow(2, attempt - 1);
+        const delayMs = retryInfoMs !== null ? Math.max(retryInfoMs, expBackoffMs) : expBackoffMs;
+        console.warn(
+          `[AEL LLM Retry] Gemini 429 RESOURCE_EXHAUSTED on attempt ${attempt}/${MAX_GEMINI_RATE_LIMIT_ATTEMPTS} (${retryInfoMs !== null ? `RetryInfo=${retryInfoMs}ms` : 'RetryInfo=none'}). Backing off ${delayMs}ms before retry...`
+        );
+        await new Promise<void>(resolve => setTimeout(resolve, delayMs));
+      }
+    }
+    if (!response && lastRateLimitError) {
+      throw lastRateLimitError instanceof Error ? lastRateLimitError : new Error(String(lastRateLimitError));
+    }
 
     const text = response.text || '';
     const usage = (response as any).usageMetadata || {};

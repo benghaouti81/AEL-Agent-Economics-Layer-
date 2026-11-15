@@ -40,6 +40,8 @@ import {
 export interface BudgetEvalOptions {
   live?: boolean;
   maxCostUsd?: number;
+  limit?: number;
+  model?: string;
 }
 
 export interface CategoryMetric {
@@ -75,6 +77,13 @@ export interface BudgetEvalResult {
   run_command: string;
   live_api_credentials_present: boolean;
   provider_source: string;
+  model: string;
+  sample_size: {
+    total_queries: number;
+    per_category: Record<string, number>;
+    limit_per_category: number | null;
+    full_dataset_queries: number;
+  };
   acceptance_status:
     | 'PASS'
     | 'NOT VALIDATED (No live upstream API credentials configured)'
@@ -779,39 +788,58 @@ function get50Queries(category: 'factual' | 'math' | 'code' | 'extraction'): Eva
   return DISTINCT_BUDGET_QUERIES[category];
 }
 
-function getTestCasesForSplit(split: 'held_out' | 'tuning'): EvalQueryCase[] {
+function getTestCasesForSplit(split: 'held_out' | 'tuning', limitPerCategory?: number): EvalQueryCase[] {
   const categories: Array<'factual' | 'math' | 'code' | 'extraction'> = ['factual', 'math', 'code', 'extraction'];
-  return split === 'held_out'
-    ? categories.flatMap(c => get50Queries(c))
-    : [
-        DISTINCT_BUDGET_QUERIES.factual[0],
-        DISTINCT_BUDGET_QUERIES.math[0],
-        DISTINCT_BUDGET_QUERIES.code[0],
-        DISTINCT_BUDGET_QUERIES.extraction[0],
-      ];
+  const cap = limitPerCategory !== undefined && limitPerCategory > 0 ? Math.floor(limitPerCategory) : undefined;
+  if (split === 'held_out') {
+    return categories.flatMap(c => {
+      const queries = get50Queries(c);
+      return cap !== undefined ? queries.slice(0, cap) : queries;
+    });
+  }
+  const tuning = [
+    DISTINCT_BUDGET_QUERIES.factual[0],
+    DISTINCT_BUDGET_QUERIES.math[0],
+    DISTINCT_BUDGET_QUERIES.code[0],
+    DISTINCT_BUDGET_QUERIES.extraction[0],
+  ];
+  return cap !== undefined ? tuning.slice(0, cap * categories.length) : tuning;
 }
 
-export function buildLiveGeminiBudgetProfile(): ProviderProfile {
+function getGeminiPricingForModel(model: string): { input: number; output: number; reasoning: number } {
+  if (/2\.5-pro/i.test(model)) {
+    return { input: 1.25, output: 10.0, reasoning: 10.0 };
+  }
+  if (/flash-lite/i.test(model)) {
+    return { input: 0.10, output: 0.40, reasoning: 0.40 };
+  }
+  return { input: 0.10, output: 0.40, reasoning: 0.40 };
+}
+
+export function buildLiveGeminiBudgetProfile(model?: string): ProviderProfile {
+  const resolvedModel = (model || process.env.AEL_LIVE_MODEL || 'gemini-2.5-flash').trim();
+  const pricing = getGeminiPricingForModel(resolvedModel);
   return {
     name: 'live_gemini',
     type: 'gemini',
     api_key_env: 'GEMINI_API_KEY',
-    default_model: 'gemini-2.5-flash',
+    default_model: resolvedModel,
     cheap_model: 'gemini-2.5-flash-lite',
     reasoning_model: 'gemini-2.5-pro',
     supports_reasoning_effort: true,
     supports_logprobs: false,
-    input_cost_per_million: 0.10,
-    output_cost_per_million: 0.40,
-    reasoning_cost_per_million: 0.40,
+    input_cost_per_million: pricing.input,
+    output_cost_per_million: pricing.output,
+    reasoning_cost_per_million: pricing.reasoning,
   };
 }
 
 export function projectBudgetEvalCost(
   split: 'held_out' | 'tuning' = 'held_out',
-  provider: ProviderProfile = buildLiveGeminiBudgetProfile()
+  provider: ProviderProfile = buildLiveGeminiBudgetProfile(),
+  limitPerCategory?: number
 ) {
-  const testCases = getTestCasesForSplit(split);
+  const testCases = getTestCasesForSplit(split, limitPerCategory);
   // Accounts for baseline pass-through + AEL probe/escalation + factual LLM judge checks
   return estimateProjectedEvalCost({
     queries: testCases.map(t => t.query),
@@ -873,15 +901,39 @@ export async function runBudgetEvalSuite(
       : 'mock';
   }
 
+  const effectiveLimit = options.limit !== undefined && options.limit > 0 ? Math.floor(options.limit) : undefined;
+  const liveProfile = buildLiveGeminiBudgetProfile(options.model);
   const provider: ProviderProfile = liveMode
-    ? buildLiveGeminiBudgetProfile()
+    ? liveProfile
     : {
         name: hasLiveApiKey ? `live_${providerType}` : 'smoke_mock',
         type: providerType,
         api_key_env: providerType === 'openai' ? 'OPENAI_API_KEY' : providerType === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'GEMINI_API_KEY',
-        default_model: providerType === 'openai' ? 'gpt-4o-mini' : providerType === 'anthropic' ? 'claude-3-5-haiku-20241022' : 'gemini-2.5-flash',
-        cheap_model: providerType === 'openai' ? 'gpt-4o-mini' : providerType === 'anthropic' ? 'claude-3-5-haiku-20241022' : 'gemini-2.5-flash-lite',
-        reasoning_model: providerType === 'openai' ? 'o3-mini' : providerType === 'anthropic' ? 'claude-3-7-sonnet-20250219' : 'gemini-2.5-pro',
+        default_model:
+          options.model ||
+          (providerType === 'openai'
+            ? 'gpt-4o-mini'
+            : providerType === 'anthropic'
+              ? 'claude-3-5-haiku-20241022'
+              : providerType === 'gemini'
+                ? 'gemini-2.5-flash'
+                : 'mock-model'),
+        cheap_model:
+          providerType === 'openai'
+            ? 'gpt-4o-mini'
+            : providerType === 'anthropic'
+              ? 'claude-3-5-haiku-20241022'
+              : providerType === 'gemini'
+                ? 'gemini-2.5-flash-lite'
+                : 'mock-model',
+        reasoning_model:
+          providerType === 'openai'
+            ? 'o3-mini'
+            : providerType === 'anthropic'
+              ? 'claude-3-7-sonnet-20250219'
+              : providerType === 'gemini'
+                ? 'gemini-2.5-pro'
+                : 'mock-model',
         supports_reasoning_effort: true,
         supports_logprobs: true,
         input_cost_per_million: 0.15,
@@ -889,7 +941,7 @@ export async function runBudgetEvalSuite(
         reasoning_cost_per_million: 0.60,
       };
 
-  const projected = projectBudgetEvalCost(split, provider);
+  const projected = projectBudgetEvalCost(split, provider, effectiveLimit);
   if (liveMode || options.maxCostUsd !== undefined) {
     assertWithinSpendingGuard(projected.projectedCostUsd, maxCostUsd, `budget_eval_suite(${split}):preflight`);
   }
@@ -901,7 +953,8 @@ export async function runBudgetEvalSuite(
   );
   const engine = new BudgetEngine(llm, logStore, circuitBreaker, DEFAULT_PRESETS.balanced);
 
-  const testCases = getTestCasesForSplit(split);
+  const fullSplitCount = getTestCasesForSplit(split).length;
+  const testCases = getTestCasesForSplit(split, effectiveLimit);
 
   const catMethods: Record<'factual' | 'math' | 'code' | 'extraction', VerificationMethod> = {
     factual: 'judge_verdict',
@@ -1047,6 +1100,15 @@ export async function runBudgetEvalSuite(
   const now = new Date();
   const dateStr = now.toISOString().split('T')[0];
 
+  const cmdParts = [`npx tsx bin/ael.ts eval --suite budget --split ${split}`];
+  if (liveMode) cmdParts.push('--live');
+  if (options.model) cmdParts.push(`--model ${options.model}`);
+  if (effectiveLimit !== undefined) cmdParts.push(`--limit ${effectiveLimit}`);
+
+  const perCategorySampleCounts = Object.fromEntries(
+    Object.entries(categoryResults).map(([cat, m]) => [cat, m.total_samples])
+  );
+
   const result: BudgetEvalResult = {
     suite_name: `AERA/CoBa Thinking Budget Comparative Benchmark (${split.toUpperCase()})`,
     benchmark_type: 'comparative_benchmark_identical_samples',
@@ -1055,11 +1117,16 @@ export async function runBudgetEvalSuite(
     split,
     timestamp: now.toISOString(),
     execution_date: dateStr,
-    run_command: liveMode
-      ? `npx tsx bin/ael.ts eval --suite budget --split ${split} --live`
-      : `npx tsx bin/ael.ts eval --suite budget --split ${split}`,
+    run_command: cmdParts.join(' '),
     live_api_credentials_present: hasLiveApiKey,
     provider_source: hasLiveApiKey ? providerType : 'mock_simulator',
+    model: provider.default_model,
+    sample_size: {
+      total_queries: testCases.length,
+      per_category: perCategorySampleCounts,
+      limit_per_category: effectiveLimit ?? null,
+      full_dataset_queries: fullSplitCount,
+    },
     acceptance_status: acceptanceStatus,
     total_queries: testCases.length,
     overall_baseline_tokens: totalBaseTok,

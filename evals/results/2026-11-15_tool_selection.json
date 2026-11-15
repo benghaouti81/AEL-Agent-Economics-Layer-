@@ -1,10 +1,18 @@
 {
   "suite_name": "Tool-DC Verification & Safety Suite",
-  "timestamp": "2026-11-15T12:19:15.365Z",
+  "timestamp": "2026-11-15T12:43:04.980Z",
   "execution_date": "2026-11-15",
   "run_command": "npx tsx bin/ael.ts eval --suite tool",
   "live_api_credentials_present": false,
   "provider_source": "mock_simulator",
+  "model": "mock-model",
+  "sample_size": {
+    "selection_cases": 10,
+    "dry_run_catch_cases": 3,
+    "total_cases": 13,
+    "limit_per_category": null,
+    "full_selection_cases": 10
+  },
   "acceptance_status": "NOT VALIDATED (No live upstream API credentials configured)",
   "total_cases": 13,
   "selection_cases_total": 10,

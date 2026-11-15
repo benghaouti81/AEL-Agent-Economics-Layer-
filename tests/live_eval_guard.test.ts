@@ -137,4 +137,77 @@ describe('Live Evaluation Credentials & Spending Guard', () => {
       store.close();
     }
   });
+
+  it('caps tasks per category with limit and records model + sample_size explicitly in eval results (P0-21)', async () => {
+    const origAllowMock = process.env.AEL_ALLOW_MOCK;
+    process.env.AEL_ALLOW_MOCK = '1';
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+
+    const dbPath = path.join(os.tmpdir(), `ael_limit_test_${Date.now()}.db`);
+    tmpDbs.push(dbPath);
+    const store = new DecisionLogStore(dbPath);
+
+    // Prevent test from overwriting committed held_out / tool result files on disk
+    const origWriteFileSync = fs.writeFileSync.bind(fs);
+    const writeSpy = vi.spyOn(fs, 'writeFileSync').mockImplementation((file, data, options) => {
+      const f = String(file);
+      if (f.includes('_budget_held_out.json') || f.includes('_tool_selection.json')) return;
+      return origWriteFileSync(file, data as string | NodeJS.ArrayBufferView, options);
+    });
+
+    try {
+      const flashLiteProfile = buildLiveGeminiBudgetProfile('gemini-2.5-flash-lite');
+      expect(flashLiteProfile.default_model).toBe('gemini-2.5-flash-lite');
+
+      const limitedProj = projectBudgetEvalCost('held_out', flashLiteProfile, 5);
+      const fullProj = projectBudgetEvalCost('held_out', flashLiteProfile);
+      expect(limitedProj.queryCount).toBe(20);
+      expect(fullProj.queryCount).toBe(200);
+      expect(limitedProj.projectedCostUsd).toBeLessThan(fullProj.projectedCostUsd);
+      expect(limitedProj.projectedCostUsd).toBeLessThan(MAX_LIVE_EVAL_COST_USD);
+
+      const limitedToolProj = projectToolEvalCost(buildLiveGeminiToolProfile('gemini-2.5-flash-lite'), 5);
+      expect(limitedToolProj.queryCount).toBe(5);
+
+      const budgetRes = await runBudgetEvalSuite(store, 'held_out', {
+        limit: 5,
+        model: 'gemini-2.5-flash-lite',
+      });
+      expect(budgetRes.model).toBe('gemini-2.5-flash-lite');
+      expect(budgetRes.total_queries).toBe(20);
+      expect(budgetRes.sample_size).toEqual({
+        total_queries: 20,
+        per_category: { factual: 5, math: 5, code: 5, extraction: 5 },
+        limit_per_category: 5,
+        full_dataset_queries: 200,
+      });
+      expect(budgetRes.run_command).toContain('--limit 5');
+      expect(budgetRes.run_command).toContain('--model gemini-2.5-flash-lite');
+
+      const toolRes = await runToolEvalSuite(store, {
+        limit: 5,
+        model: 'gemini-2.5-flash-lite',
+      });
+      expect(toolRes.model).toBe('gemini-2.5-flash-lite');
+      expect(toolRes.selection_cases_total).toBe(5);
+      expect(toolRes.dry_run_catch_cases_total).toBe(3);
+      expect(toolRes.total_cases).toBe(8);
+      expect(toolRes.sample_size).toEqual({
+        selection_cases: 5,
+        dry_run_catch_cases: 3,
+        total_cases: 8,
+        limit_per_category: 5,
+        full_selection_cases: 10,
+      });
+      expect(toolRes.run_command).toContain('--limit 5');
+      expect(toolRes.run_command).toContain('--model gemini-2.5-flash-lite');
+    } finally {
+      writeSpy.mockRestore();
+      if (origAllowMock === undefined) delete process.env.AEL_ALLOW_MOCK;
+      else process.env.AEL_ALLOW_MOCK = origAllowMock;
+      store.close();
+    }
+  });
 });

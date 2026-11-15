@@ -8,8 +8,8 @@
 
 import { Command } from 'commander';
 import { getDecisionLog } from '../src/db/decision_log.js';
-import { runToolEvalSuite, projectToolEvalCost } from '../evals/suites/tool_eval_suite.js';
-import { runBudgetEvalSuite, projectBudgetEvalCost } from '../evals/suites/budget_eval_suite.js';
+import { runToolEvalSuite, projectToolEvalCost, buildLiveGeminiToolProfile } from '../evals/suites/tool_eval_suite.js';
+import { runBudgetEvalSuite, projectBudgetEvalCost, buildLiveGeminiBudgetProfile } from '../evals/suites/budget_eval_suite.js';
 import {
   MAX_LIVE_EVAL_COST_USD,
   assertValidGeminiKey,
@@ -84,6 +84,8 @@ program
   .option('--split <split>', 'Dataset split for budget suite: "held_out" or "tuning"', 'held_out')
   .option('-d, --db <path>', 'Path to SQLite database', './data/ael_decisions.db')
   .option('--live', 'Force live Gemini API execution and emit <date>_live_*.json results', false)
+  .option('--limit <n>', 'Cap tasks per category for a run (0 or omitted runs full dataset)')
+  .option('--model <model>', 'Override live Gemini model identifier (e.g. gemini-2.5-flash-lite, gemini-2.5-flash)')
   .option('--max-cost-usd <usd>', 'Spending guard cap in USD (aborts if projected cost exceeds cap)', String(MAX_LIVE_EVAL_COST_USD))
   .option('--preflight-only', 'Validate live credentials and projected cost spending guard without executing API calls', false)
   .action(async (options) => {
@@ -91,12 +93,22 @@ program
     const maxCostUsd = Number(options.maxCostUsd);
     const split = (options.split || 'held_out') as 'held_out' | 'tuning';
 
+    let limit: number | undefined;
+    if (options.limit !== undefined && String(options.limit).trim() !== '') {
+      const parsedLimit = Number(options.limit);
+      if (!Number.isInteger(parsedLimit) || parsedLimit < 0) {
+        throw new Error(`[AEL Eval] Invalid --limit '${options.limit}': expected a non-negative integer.`);
+      }
+      limit = parsedLimit > 0 ? parsedLimit : undefined;
+    }
+    const model: string | undefined = options.model ? String(options.model).trim() : undefined;
+
     let projectedTotalUsd = 0;
     if (options.suite === 'tool' || options.suite === 'all') {
-      projectedTotalUsd += projectToolEvalCost().projectedCostUsd;
+      projectedTotalUsd += projectToolEvalCost(buildLiveGeminiToolProfile(model), limit).projectedCostUsd;
     }
     if (options.suite === 'budget' || options.suite === 'all') {
-      projectedTotalUsd += projectBudgetEvalCost(split).projectedCostUsd;
+      projectedTotalUsd += projectBudgetEvalCost(split, buildLiveGeminiBudgetProfile(model), limit).projectedCostUsd;
     }
 
     if (liveMode || options.preflightOnly) {
@@ -111,13 +123,14 @@ program
     }
 
     const logStore = getDecisionLog(options.db);
-    console.log(`\nStarting AEL Evaluation Harness [Suite: ${options.suite}${liveMode ? ', LIVE Gemini' : ''}]...\n`);
+    console.log(`\nStarting AEL Evaluation Harness [Suite: ${options.suite}${liveMode ? ', LIVE Gemini' : ''}${limit ? `, Limit: ${limit}/cat` : ''}${model ? `, Model: ${model}` : ''}]...\n`);
 
     if (options.suite === 'tool' || options.suite === 'all') {
       console.log('>>> Running Tool-DC Evaluation Suite (arXiv:2603.11495)...');
-      const toolRes = await runToolEvalSuite(logStore, { live: liveMode, maxCostUsd });
+      const toolRes = await runToolEvalSuite(logStore, { live: liveMode, maxCostUsd, limit, model });
       const toolFile = liveMode ? `${toolRes.execution_date}_live_tool_selection.json` : `${toolRes.execution_date}_tool_selection.json`;
       console.log(`Total Cases:              ${toolRes.total_cases} (${toolRes.selection_cases_total} selection + ${toolRes.dry_run_catch_cases_total} dry-run catch)`);
+      console.log(`Model / Sample Cap:       ${toolRes.model} (limit=${toolRes.sample_size.limit_per_category ?? 'none'})`);
       console.log(`Tool Accuracy:            ${(toolRes.accuracy * 100).toFixed(1)}% (${toolRes.selection_accuracy_ratio}, Criteria >= 90%: ${toolRes.accuracy >= 0.90 ? 'PASS' : 'FAIL'})`);
       console.log(`Dry-Run Catches:          ${toolRes.dry_run_catches} (${toolRes.dry_run_catch_ratio}, Criteria >= 3: ${toolRes.dry_run_catches >= 3 ? 'PASS' : 'FAIL'})`);
       console.log(`Provider Source:          ${toolRes.provider_source}`);
@@ -130,17 +143,18 @@ program
 
     if (options.suite === 'budget' || options.suite === 'all') {
       console.log(`>>> Running AERA/CoBa Thinking Budget Suite [Split: ${split}]...`);
-      const budgetRes = await runBudgetEvalSuite(logStore, split, { live: liveMode, maxCostUsd });
+      const budgetRes = await runBudgetEvalSuite(logStore, split, { live: liveMode, maxCostUsd, limit, model });
       const budgetFile = liveMode ? `${budgetRes.execution_date}_live_budget_${split}.json` : `${budgetRes.execution_date}_budget_${split}.json`;
       console.log(`Live API Credentials:     ${budgetRes.live_api_credentials_present ? `YES (${budgetRes.provider_source})` : `NONE (${budgetRes.provider_source} smoke mode)`}`);
-      console.log(`Total Evaluated Queries:  ${budgetRes.total_queries} (50 per category across 4 mixed categories)`);
+      console.log(`Model / Sample Size:      ${budgetRes.model} (${budgetRes.sample_size.total_queries}/${budgetRes.sample_size.full_dataset_queries} queries, limit=${budgetRes.sample_size.limit_per_category ?? 'none'})`);
+      console.log(`Total Evaluated Queries:  ${budgetRes.total_queries} (${limit ?? 50} per category across 4 mixed categories)`);
       console.log(`Overall Token Reduction:  ${budgetRes.overall_token_reduction_pct}% (${budgetRes.overall_token_reduction_ratio})`);
       console.log(`Accuracy Delta:           ${budgetRes.accuracy_drop_pp} pp (Base ${budgetRes.overall_baseline_accuracy_ratio} -> AEL ${budgetRes.overall_accuracy_ratio})`);
       console.log(`p95 Decision Overhead:    ${budgetRes.overall_p95_overhead_ms} ms (Criteria < 500ms: ${budgetRes.overall_p95_overhead_ms < 500 ? 'PASS' : 'FAIL'})`);
       console.log(`Net Cost Saved (USD):     $${budgetRes.overall_net_savings_usd.toFixed(4)}`);
       console.log(`Verification Cost (Judge):$${budgetRes.verification_cost.toFixed(6)} (disclosed separately from product costs)`);
       
-      console.log('\n--- Breakdown per Category (50 queries each) ---');
+      console.log('\n--- Breakdown per Category ---');
       for (const [cat, metric] of Object.entries(budgetRes.categories)) {
         console.log(`Category [${cat.padEnd(10, ' ')}]: N=${metric.total_samples} [${metric.verification_method}], Token Savings = ${metric.token_reduction_pct}% (${metric.token_reduction_ratio}), BaseAcc = ${(metric.baseline_accuracy * 100).toFixed(1)}% (${metric.baseline_accuracy_ratio}), AELAcc = ${(metric.accuracy * 100).toFixed(1)}% (${metric.accuracy_ratio}), Net Saved = $${metric.net_cost_saved_usd.toFixed(4)}`);
       }
