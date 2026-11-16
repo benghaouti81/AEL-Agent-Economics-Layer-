@@ -167,6 +167,7 @@ function resolveCanonicalDatasetForResult(data: any): {
   resolved: boolean;
   canonicalDataset?: unknown;
   expectedCount?: number;
+  expectedPerCategory?: Record<string, number>;
   error?: string;
 } {
   const limitRaw = data.sample_size?.limit_per_category;
@@ -189,7 +190,21 @@ function resolveCanonicalDatasetForResult(data: any): {
       };
     }
     const cases = getBudgetEvalCanonicalCases(data.split, limitPerCategory);
-    return { resolved: true, canonicalDataset: cases, expectedCount: cases.length };
+    const expectedPerCategory: Record<string, number> = {
+      factual: 0,
+      math: 0,
+      code: 0,
+      extraction: 0,
+    };
+    for (const c of cases) {
+      expectedPerCategory[c.category] = (expectedPerCategory[c.category] || 0) + 1;
+    }
+    return {
+      resolved: true,
+      canonicalDataset: cases,
+      expectedCount: cases.length,
+      expectedPerCategory,
+    };
   }
 
   if (data.dataset_version === TOOL_EVAL_DATASET_VERSION) {
@@ -204,6 +219,10 @@ function resolveCanonicalDatasetForResult(data: any): {
       resolved: true,
       canonicalDataset: cases,
       expectedCount: cases.selection_cases.length + cases.catch_scenarios.length,
+      expectedPerCategory: {
+        selection_cases: cases.selection_cases.length,
+        dry_run_catch_cases: cases.catch_scenarios.length,
+      },
     };
   }
 
@@ -275,6 +294,9 @@ export function validateBenchmarkResult(
       `Missing or invalid dataset_hash_algorithm '${String(data.dataset_hash_algorithm)}': expected '${DATASET_HASH_ALGORITHM}'.`
     );
   }
+  let expectedEvaluatedCount: number | undefined;
+  let expectedPerCategory: Record<string, number> | undefined;
+
   if (!isNonEmptyString(data.dataset_hash) || !/^[a-f0-9]{64}$/i.test(data.dataset_hash)) {
     errors.push('Missing or invalid SHA-256 dataset_hash.');
   } else if (options.datasetCases !== undefined) {
@@ -284,21 +306,28 @@ export function validateBenchmarkResult(
         `Dataset hash mismatch against supplied canonical cases: expected ${expectedHash}, got ${data.dataset_hash}.`
       );
     }
+    if (Array.isArray(options.datasetCases)) {
+      expectedEvaluatedCount = options.datasetCases.length;
+    } else if (
+      options.datasetCases &&
+      typeof options.datasetCases === 'object' &&
+      Array.isArray((options.datasetCases as any).selection_cases) &&
+      Array.isArray((options.datasetCases as any).catch_scenarios)
+    ) {
+      expectedEvaluatedCount =
+        (options.datasetCases as any).selection_cases.length + (options.datasetCases as any).catch_scenarios.length;
+    }
   } else {
     const resolution = resolveCanonicalDatasetForResult(data);
     if (!resolution.resolved) {
       errors.push(resolution.error!);
     } else {
+      expectedEvaluatedCount = resolution.expectedCount;
+      expectedPerCategory = resolution.expectedPerCategory;
       const expectedHash = computeDatasetHash(resolution.canonicalDataset);
       if (data.dataset_hash.toLowerCase() !== expectedHash) {
         errors.push(
           `Dataset hash mismatch for dataset_version='${data.dataset_version}' split='${data.split}' limit_per_category=${String(data.sample_size?.limit_per_category ?? null)}: expected ${expectedHash}, got ${data.dataset_hash}.`
-        );
-      }
-      const recordedTotal = data.sample_size?.total_queries ?? data.sample_size?.total_cases;
-      if (typeof recordedTotal === 'number' && resolution.expectedCount !== undefined && recordedTotal !== resolution.expectedCount) {
-        errors.push(
-          `Sample count mismatch for canonical dataset (${recordedTotal} recorded vs ${resolution.expectedCount} expected).`
         );
       }
     }
@@ -465,6 +494,100 @@ export function validateBenchmarkResult(
   }
 
   if (isToolSuite) {
+    // Strict sample-count integrity (P0-25) for Tool-DC suite
+    const totalCasesSample = data.sample_size?.total_cases;
+    const totalCasesTop = data.total_cases;
+    if (typeof totalCasesSample !== 'number' || !Number.isInteger(totalCasesSample) || totalCasesSample <= 0) {
+      errors.push(`Missing or invalid sample_size.total_cases (${String(totalCasesSample)}).`);
+    }
+    if (typeof totalCasesTop !== 'number' || !Number.isInteger(totalCasesTop) || totalCasesTop <= 0) {
+      errors.push(`Missing or invalid top-level total_cases (${String(totalCasesTop)}).`);
+    }
+    if (typeof totalCasesSample === 'number' && typeof totalCasesTop === 'number' && totalCasesSample !== totalCasesTop) {
+      errors.push(
+        `Inconsistent total_cases count: sample_size.total_cases (${totalCasesSample}) != total_cases (${totalCasesTop}).`
+      );
+    }
+    if (
+      typeof totalCasesSample === 'number' &&
+      expectedEvaluatedCount !== undefined &&
+      totalCasesSample !== expectedEvaluatedCount
+    ) {
+      errors.push(
+        `Sample count mismatch for canonical tool dataset (${totalCasesSample} recorded vs ${expectedEvaluatedCount} expected).`
+      );
+    }
+    if (typeof validSamples === 'number') {
+      if (typeof totalCasesSample === 'number' && validSamples !== totalCasesSample) {
+        errors.push(
+          `Partial or interrupted tool evaluation rejected: valid_samples (${validSamples}) != total_cases (${totalCasesSample}).`
+        );
+      }
+      if (expectedEvaluatedCount !== undefined && validSamples !== expectedEvaluatedCount) {
+        errors.push(
+          `Incomplete tool evaluation rejected: valid_samples (${validSamples}) != expected evaluated count (${expectedEvaluatedCount}).`
+        );
+      }
+    }
+    const selCasesCount = data.sample_size?.selection_cases;
+    const catchCasesCount = data.sample_size?.dry_run_catch_cases;
+    if (
+      typeof selCasesCount !== 'number' ||
+      !Number.isInteger(selCasesCount) ||
+      selCasesCount <= 0 ||
+      typeof catchCasesCount !== 'number' ||
+      !Number.isInteger(catchCasesCount) ||
+      catchCasesCount <= 0
+    ) {
+      errors.push('Missing or invalid sample_size.selection_cases or sample_size.dry_run_catch_cases.');
+    } else {
+      if (typeof totalCasesSample === 'number' && selCasesCount + catchCasesCount !== totalCasesSample) {
+        errors.push(
+          `Inconsistent tool category sample counts: selection_cases (${selCasesCount}) + dry_run_catch_cases (${catchCasesCount}) != total_cases (${totalCasesSample}).`
+        );
+      }
+      if (
+        expectedPerCategory?.selection_cases !== undefined &&
+        selCasesCount !== expectedPerCategory.selection_cases
+      ) {
+        errors.push(
+          `Inconsistent tool selection_cases (${selCasesCount} vs expected ${expectedPerCategory.selection_cases}).`
+        );
+      }
+      if (
+        expectedPerCategory?.dry_run_catch_cases !== undefined &&
+        catchCasesCount !== expectedPerCategory.dry_run_catch_cases
+      ) {
+        errors.push(
+          `Inconsistent tool dry_run_catch_cases (${catchCasesCount} vs expected ${expectedPerCategory.dry_run_catch_cases}).`
+        );
+      }
+      if (data.accuracy_metrics?.selection_total !== selCasesCount) {
+        errors.push(
+          `accuracy_metrics.selection_total (${String(data.accuracy_metrics?.selection_total)}) does not match selection_cases (${selCasesCount}).`
+        );
+      }
+      if (data.accuracy_metrics?.dry_run_catches_total !== catchCasesCount) {
+        errors.push(
+          `accuracy_metrics.dry_run_catches_total (${String(data.accuracy_metrics?.dry_run_catches_total)}) does not match dry_run_catch_cases (${catchCasesCount}).`
+        );
+      }
+    }
+    if (verifiers && typeof validSamples === 'number' && verifiers.total_verifications !== validSamples) {
+      errors.push(
+        `verifier_results.total_verifications (${verifiers.total_verifications}) must match valid_samples (${validSamples}) for Tool-DC suite.`
+      );
+    }
+    if (data.cases !== undefined) {
+      if (!Array.isArray(data.cases)) {
+        errors.push('Tool benchmark cases must be an array.');
+      } else if (typeof validSamples === 'number' && data.cases.length !== validSamples) {
+        errors.push(
+          `Recorded cases count (${data.cases.length}) disagrees with valid_samples (${validSamples}); partial runs are rejected.`
+        );
+      }
+    }
+
     if (
       !usage ||
       !isFiniteNonNeg(usage.ael_input_tokens) ||
@@ -498,6 +621,113 @@ export function validateBenchmarkResult(
   }
 
   if (isBudgetSuite) {
+    // Strict sample-count & category-count integrity (P0-25) for Budget suite
+    const totalQueriesSample = data.sample_size?.total_queries;
+    const totalQueriesTop = data.total_queries;
+    if (typeof totalQueriesSample !== 'number' || !Number.isInteger(totalQueriesSample) || totalQueriesSample <= 0) {
+      errors.push(`Missing or invalid sample_size.total_queries (${String(totalQueriesSample)}).`);
+    }
+    if (typeof totalQueriesTop !== 'number' || !Number.isInteger(totalQueriesTop) || totalQueriesTop <= 0) {
+      errors.push(`Missing or invalid top-level total_queries (${String(totalQueriesTop)}).`);
+    }
+    if (
+      typeof totalQueriesSample === 'number' &&
+      typeof totalQueriesTop === 'number' &&
+      totalQueriesSample !== totalQueriesTop
+    ) {
+      errors.push(
+        `Inconsistent total_queries count: sample_size.total_queries (${totalQueriesSample}) != total_queries (${totalQueriesTop}).`
+      );
+    }
+    if (
+      typeof totalQueriesSample === 'number' &&
+      expectedEvaluatedCount !== undefined &&
+      totalQueriesSample !== expectedEvaluatedCount
+    ) {
+      errors.push(
+        `Sample count mismatch for canonical budget dataset (${totalQueriesSample} recorded vs ${expectedEvaluatedCount} expected).`
+      );
+    }
+    if (typeof validSamples === 'number') {
+      if (typeof totalQueriesSample === 'number' && validSamples !== totalQueriesSample) {
+        errors.push(
+          `Partial or interrupted budget evaluation rejected: valid_samples (${validSamples}) != total_queries (${totalQueriesSample}).`
+        );
+      }
+      if (expectedEvaluatedCount !== undefined && validSamples !== expectedEvaluatedCount) {
+        errors.push(
+          `Incomplete budget evaluation rejected: valid_samples (${validSamples}) != expected evaluated count (${expectedEvaluatedCount}).`
+        );
+      }
+    }
+
+    const perCategory = data.sample_size?.per_category;
+    if (!perCategory || typeof perCategory !== 'object' || Array.isArray(perCategory)) {
+      errors.push('Missing sample_size.per_category breakdown.');
+    } else {
+      const catValues = Object.values(perCategory);
+      if (
+        catValues.length === 0 ||
+        catValues.some(v => typeof v !== 'number' || !Number.isInteger(v) || v < 0)
+      ) {
+        errors.push('Invalid non-integer or negative count in sample_size.per_category.');
+      } else {
+        const perCategorySum = (catValues as number[]).reduce((s, n) => s + n, 0);
+        if (typeof totalQueriesSample === 'number' && perCategorySum !== totalQueriesSample) {
+          errors.push(
+            `Inconsistent category sample counts: sum(sample_size.per_category)=${perCategorySum} != total_queries=${totalQueriesSample}.`
+          );
+        }
+        if (typeof validSamples === 'number' && perCategorySum !== validSamples) {
+          errors.push(
+            `Inconsistent category sample counts: sum(sample_size.per_category)=${perCategorySum} != valid_samples=${validSamples}.`
+          );
+        }
+      }
+      if (expectedPerCategory) {
+        for (const [cat, expectedCatCount] of Object.entries(expectedPerCategory)) {
+          if (perCategory[cat] !== expectedCatCount) {
+            errors.push(
+              `Inconsistent category count for '${cat}': recorded ${String(perCategory[cat])} vs expected ${expectedCatCount}.`
+            );
+          }
+        }
+      }
+    }
+
+    if (data.categories !== undefined) {
+      if (!data.categories || typeof data.categories !== 'object' || Array.isArray(data.categories)) {
+        errors.push('Invalid categories summary object.');
+      } else {
+        const catEntries = Object.entries(data.categories as Record<string, any>);
+        let categoriesTotalSum = 0;
+        for (const [cat, catObj] of catEntries) {
+          const catSamples = catObj?.total_samples;
+          if (typeof catSamples !== 'number' || !Number.isInteger(catSamples) || catSamples < 0) {
+            errors.push(`Missing or invalid categories.${cat}.total_samples.`);
+          } else {
+            categoriesTotalSum += catSamples;
+            if (perCategory && typeof perCategory[cat] === 'number' && catSamples !== perCategory[cat]) {
+              errors.push(
+                `Inconsistent category count between categories.${cat}.total_samples (${catSamples}) and sample_size.per_category.${cat} (${perCategory[cat]}).`
+              );
+            }
+          }
+        }
+        if (typeof validSamples === 'number' && categoriesTotalSum !== validSamples) {
+          errors.push(
+            `Recorded category total_samples sum (${categoriesTotalSum}) disagrees with valid_samples (${validSamples}).`
+          );
+        }
+      }
+    }
+
+    if (verifiers && typeof validSamples === 'number' && verifiers.total_verifications !== validSamples * 2) {
+      errors.push(
+        `verifier_results.total_verifications (${verifiers.total_verifications}) must equal 2 * valid_samples (${validSamples * 2}) for comparative budget evaluation.`
+      );
+    }
+
     if (
       !usage ||
       !isFiniteNonNeg(usage.baseline_input_tokens) ||
@@ -520,6 +750,18 @@ export function validateBenchmarkResult(
     if (!metrics || typeof baseAcc !== 'number' || typeof aelAcc !== 'number') {
       errors.push('Missing accuracy_metrics on budget benchmark result.');
     } else {
+      if (typeof validSamples === 'number') {
+        if (metrics.baseline_total !== validSamples) {
+          errors.push(
+            `accuracy_metrics.baseline_total (${String(metrics.baseline_total)}) disagrees with valid_samples (${validSamples}).`
+          );
+        }
+        if (metrics.ael_total !== validSamples) {
+          errors.push(
+            `accuracy_metrics.ael_total (${String(metrics.ael_total)}) disagrees with valid_samples (${validSamples}).`
+          );
+        }
+      }
       if (baseAcc < BENCHMARK_QUALITY_FLOORS.budget_min_baseline_accuracy) {
         errors.push(
           `Baseline accuracy ${baseAcc} is below configured quality floor ${BENCHMARK_QUALITY_FLOORS.budget_min_baseline_accuracy} (zero-on-both-sides cannot pass).`

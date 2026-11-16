@@ -169,6 +169,7 @@ function makeValidLiveBudgetResult(overrides: Record<string, any> = {}) {
     },
     savings_claims_valid: true,
     acceptance_status: 'PASS',
+    total_queries: canonicalCases.length,
     overall_baseline_tokens: 5800,
     overall_actual_tokens: 2000,
     overall_token_reduction_pct: 65.5,
@@ -689,7 +690,9 @@ describe('Benchmark Integrity & Anti-Mock Regression Suite', () => {
       },
       savings_claims_valid: true,
       acceptance_status: 'PASS',
+      total_cases: 8,
       selection_cases_total: 5,
+      dry_run_catch_cases_total: 3,
     };
     expect(validateBenchmarkResult(validTool)).toEqual({ valid: true, errors: [] });
 
@@ -962,5 +965,233 @@ describe('Benchmark Integrity & Anti-Mock Regression Suite', () => {
       },
     });
     expect(validateBenchmarkResult(invalidUnverified).valid).toBe(false);
+  });
+
+  it('13. strict sample-count integrity rejects missing total_queries/total_cases, partial runs, and inconsistent category counts (P0-25)', () => {
+    const baseValid = makeValidLiveBudgetResult({
+      categories: {
+        factual: { total_samples: 5 },
+        math: { total_samples: 5 },
+        code: { total_samples: 5 },
+        extraction: { total_samples: 5 },
+      },
+    });
+    expect(validateBenchmarkResult(baseValid)).toEqual({ valid: true, errors: [] });
+
+    // 1. Missing total_queries (top-level and inside sample_size)
+    const missingTopTotal = makeValidLiveBudgetResult();
+    delete (missingTopTotal as any).total_queries;
+    expect(validateBenchmarkResult(missingTopTotal).errors.join(' ')).toMatch(/total_queries/);
+
+    const missingSampleTotal = makeValidLiveBudgetResult({
+      sample_size: {
+        valid_samples: 20,
+        per_category: { factual: 5, math: 5, code: 5, extraction: 5 },
+        limit_per_category: 5,
+      },
+    });
+    expect(validateBenchmarkResult(missingSampleTotal).errors.join(' ')).toMatch(/sample_size\.total_queries/);
+
+    // 2. Partial / interrupted budget run (valid_samples < total_queries and < expected count)
+    const partialBudget = makeValidLiveBudgetResult({
+      sample_size: {
+        total_queries: 20,
+        valid_samples: 19,
+        per_category: { factual: 5, math: 5, code: 5, extraction: 5 },
+        limit_per_category: 5,
+      },
+    });
+    const partialErrs = validateBenchmarkResult(partialBudget).errors.join(' ');
+    expect(partialErrs).toMatch(/Partial or interrupted|Incomplete budget evaluation/);
+
+    // 3. Missing per_category or inconsistent category sums / distribution
+    const missingPerCategory = makeValidLiveBudgetResult({
+      sample_size: {
+        total_queries: 20,
+        valid_samples: 20,
+        limit_per_category: 5,
+      },
+    });
+    expect(validateBenchmarkResult(missingPerCategory).errors.join(' ')).toMatch(/per_category/);
+
+    const wrongPerCategorySum = makeValidLiveBudgetResult({
+      sample_size: {
+        total_queries: 20,
+        valid_samples: 20,
+        per_category: { factual: 5, math: 5, code: 5, extraction: 4 },
+        limit_per_category: 5,
+      },
+    });
+    expect(validateBenchmarkResult(wrongPerCategorySum).errors.join(' ')).toMatch(/Inconsistent category/);
+
+    const shiftedPerCategory = makeValidLiveBudgetResult({
+      sample_size: {
+        total_queries: 20,
+        valid_samples: 20,
+        per_category: { factual: 6, math: 4, code: 5, extraction: 5 },
+        limit_per_category: 5,
+      },
+    });
+    expect(validateBenchmarkResult(shiftedPerCategory).errors.join(' ')).toMatch(/Inconsistent category count/);
+
+    // 4. categories summary disagrees with per_category / valid_samples
+    const inconsistentCategoriesSummary = makeValidLiveBudgetResult({
+      categories: {
+        factual: { total_samples: 4 },
+        math: { total_samples: 5 },
+        code: { total_samples: 5 },
+        extraction: { total_samples: 5 },
+      },
+    });
+    expect(validateBenchmarkResult(inconsistentCategoriesSummary).errors.join(' ')).toMatch(
+      /Inconsistent category count|disagrees with valid_samples/
+    );
+
+    // 5. Mismatched accuracy_metrics totals or verifier_results total_verifications
+    const badAccTotals = makeValidLiveBudgetResult({
+      accuracy_metrics: {
+        ...baseValid.accuracy_metrics,
+        baseline_total: 19,
+        ael_total: 19,
+      },
+    });
+    expect(validateBenchmarkResult(badAccTotals).errors.join(' ')).toMatch(/disagrees with valid_samples/);
+
+    const badVerifierCount = makeValidLiveBudgetResult({
+      verifier_results: {
+        total_verifications: 38,
+        passed: 38,
+        failed: 0,
+        errored: 0,
+        methods: ['judge_verdict', 'numeric_match', 'code_execution', 'json_field_match'],
+      },
+    });
+    expect(validateBenchmarkResult(badVerifierCount).errors.join(' ')).toMatch(/2 \* valid_samples/);
+
+    // 6. Tool suite: missing total_cases, partial valid_samples, inconsistent category counts, cases.length mismatch
+    const toolCases = getToolEvalCanonicalCases(5);
+    const toolPricing = getProviderPricing('gemini', 'gemini-2.5-flash');
+    const toolAgg = aggregateCallCostRecords('gemini', {
+      baseline: [],
+      ael: [
+        {
+          role: 'tool_selection',
+          requested_model: toolPricing.model,
+          model: toolPricing.model,
+          input_tokens: 500,
+          output_tokens: 150,
+          reasoning_tokens: 0,
+          total_tokens: 650,
+          input_cost_usd: 0,
+          output_cost_usd: 0,
+          reasoning_cost_usd: 0,
+          cost_usd: 0,
+          billing_basis: 'estimated_from_provider_usage_and_profile_rates',
+          cost_estimation_status: 'estimated_only_not_provider_billed',
+          provider_billed_cost_reported: false,
+          provider_source: 'gemini',
+          usage_source: 'provider_reported',
+        },
+      ],
+      verifiers: [],
+    });
+    const baseTool = {
+      suite_name: 'Tool-DC Verification & Safety Suite',
+      source: 'live_provider',
+      provider: 'gemini',
+      provider_source: 'gemini',
+      model: 'gemini-2.5-flash',
+      credential_status: 'live_credentials_present',
+      split: 'tool_selection_held_out',
+      dataset_version: TOOL_EVAL_DATASET_VERSION,
+      dataset_hash: computeDatasetHash(toolCases),
+      dataset_hash_algorithm: DATASET_HASH_ALGORITHM,
+      timestamp: '2026-11-15T10:00:00.000Z',
+      live_api_credentials_present: true,
+      model_config: {
+        default_model: 'gemini-2.5-flash',
+        cheap_model: 'gemini-2.5-flash-lite',
+        reasoning_model: 'gemini-2.5-pro',
+        supports_reasoning_effort: true,
+        supports_logprobs: false,
+      },
+      sample_size: {
+        selection_cases: 5,
+        dry_run_catch_cases: 3,
+        total_cases: 8,
+        valid_samples: 8,
+        limit_per_category: 5,
+        full_selection_cases: 10,
+      },
+      token_usage: {
+        ael_input_tokens: 500,
+        ael_output_tokens: 150,
+        ael_reasoning_tokens: 0,
+        ael_total_tokens: 650,
+        baseline_schema_tokens: 2400,
+        usage_source: 'provider_reported',
+      },
+      verifier_results: {
+        total_verifications: 8,
+        passed: 8,
+        failed: 0,
+        errored: 0,
+        methods: ['tool_name_exact_match', 'dry_run_sandbox_catch'],
+      },
+      accuracy_metrics: {
+        selection_correct: 5,
+        selection_total: 5,
+        selection_accuracy: 1.0,
+        dry_run_catches: 3,
+        dry_run_catches_total: 3,
+        quality_floor: 0.9,
+      },
+      cost_methodology: {
+        billing_basis: 'estimated_from_provider_usage_and_profile_rates',
+        cost_estimation_status: 'estimated_only_not_provider_billed',
+        provider_billed_cost_reported: false,
+        usage_source: 'provider_reported',
+        currency: 'USD',
+        accounting_granularity: 'per_call_actual_model',
+        pricing_model: toolPricing.model,
+        pricing_source: toolPricing.pricing_source,
+        pricing_last_updated: toolPricing.pricing_last_updated,
+        input_cost_per_million: toolPricing.input,
+        output_cost_per_million: toolPricing.output,
+        reasoning_cost_per_million: toolPricing.reasoning,
+        verification_cost_excluded_from_product_savings: true,
+        per_model_cost_breakdown: toolAgg.per_model_cost_breakdown,
+        bucket_breakdown: toolAgg.bucket_breakdown,
+      },
+      savings_claims_valid: true,
+      acceptance_status: 'PASS',
+      total_cases: 8,
+      selection_cases_total: 5,
+      dry_run_catch_cases_total: 3,
+      cases: Array.from({ length: 8 }, (_, idx) => ({ case_type: idx < 5 ? 'selection' : 'dry_run_catch' })),
+    };
+    expect(validateBenchmarkResult(baseTool)).toEqual({ valid: true, errors: [] });
+
+    const missingToolTotal = { ...baseTool };
+    delete (missingToolTotal as any).total_cases;
+    expect(validateBenchmarkResult(missingToolTotal).errors.join(' ')).toMatch(/total_cases/);
+
+    const partialTool = {
+      ...baseTool,
+      sample_size: { ...baseTool.sample_size, valid_samples: 7 },
+    };
+    expect(validateBenchmarkResult(partialTool).errors.join(' ')).toMatch(/Partial or interrupted tool evaluation/);
+
+    const truncatedRecordedCases = {
+      ...baseTool,
+      cases: baseTool.cases.slice(0, 7),
+    };
+    expect(validateBenchmarkResult(truncatedRecordedCases).errors.join(' ')).toMatch(/Recorded cases count/);
+
+    const inconsistentToolCat = {
+      ...baseTool,
+      sample_size: { ...baseTool.sample_size, selection_cases: 4, dry_run_catch_cases: 3 },
+    };
+    expect(validateBenchmarkResult(inconsistentToolCat).errors.join(' ')).toMatch(/Inconsistent tool/);
   });
 });
