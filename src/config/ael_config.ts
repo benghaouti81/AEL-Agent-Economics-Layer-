@@ -9,6 +9,13 @@ import fs from 'node:fs';
 import { load } from 'js-yaml';
 import { ScalingRegimeSchema } from '../models/contracts.js';
 
+export const ModelTokenPricingSchema = z.object({
+  input_cost_per_million: z.number().nonnegative(),
+  output_cost_per_million: z.number().nonnegative(),
+  reasoning_cost_per_million: z.number().nonnegative(),
+});
+export type ModelTokenPricing = z.infer<typeof ModelTokenPricingSchema>;
+
 export const ProviderProfileSchema = z.object({
   name: z.string(),
   type: z.enum(['openai', 'anthropic', 'gemini']),
@@ -28,10 +35,12 @@ export const ProviderProfileSchema = z.object({
       high: z.number().int().min(-1).optional(),
     })
     .optional(),
-  // Pricing per 1M tokens in USD
+  // Pricing per 1M tokens in USD (primary default model)
   input_cost_per_million: z.number().default(0.15),
   output_cost_per_million: z.number().default(0.60),
   reasoning_cost_per_million: z.number().default(0.60),
+  // Optional per-model pricing overrides for cheap_model / reasoning_model / multi-model routing
+  model_pricing: z.record(z.string(), ModelTokenPricingSchema).optional(),
 });
 export type ProviderProfile = z.infer<typeof ProviderProfileSchema>;
 

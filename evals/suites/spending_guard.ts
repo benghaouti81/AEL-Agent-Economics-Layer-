@@ -5,7 +5,7 @@
  */
 
 import { ProviderProfile } from '../../src/config/ael_config.js';
-import { isPlaceholderOrEmptyKey } from '../../src/llm/client.js';
+import { CallUsageRecord, isPlaceholderOrEmptyKey } from '../../src/llm/client.js';
 
 export const MAX_LIVE_EVAL_COST_USD = 1.0;
 
@@ -188,6 +188,191 @@ export function getProviderPricing(providerType: LiveProviderType, model: string
     model: normalizedModel,
     ...entry,
     is_estimated_rate_card: true,
+  };
+}
+
+export interface ModelCostBreakdownEntry {
+  model: string;
+  calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  reasoning_tokens: number;
+  total_tokens: number;
+  input_cost_usd: number;
+  output_cost_usd: number;
+  reasoning_cost_usd: number;
+  total_cost_usd: number;
+  pricing_source: string;
+  pricing_last_updated: string;
+  input_cost_per_million: number;
+  output_cost_per_million: number;
+  reasoning_cost_per_million: number;
+  billing_basis: 'estimated_from_provider_usage_and_profile_rates';
+  cost_estimation_status: 'estimated_only_not_provider_billed';
+  provider_billed_cost_reported: false;
+}
+
+export interface BucketCostSummary {
+  calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  reasoning_tokens: number;
+  total_tokens: number;
+  input_cost_usd: number;
+  output_cost_usd: number;
+  reasoning_cost_usd: number;
+  total_cost_usd: number;
+  models: Record<string, ModelCostBreakdownEntry>;
+}
+
+export interface BucketBreakdown {
+  baseline: BucketCostSummary;
+  ael: BucketCostSummary;
+  verifiers: BucketCostSummary;
+}
+
+/**
+ * Resolves exact catalog pricing for a single provider call using the ACTUAL model returned
+ * by the provider. Rejects unknown/uncatalogued models with `[AEL Pricing Error]` instead of
+ * falling back to the primary model's rate card.
+ */
+export function resolveCallCostBreakdown(
+  providerType: LiveProviderType,
+  call: Pick<
+    CallUsageRecord,
+    'role' | 'requested_model' | 'model' | 'input_tokens' | 'output_tokens' | 'reasoning_tokens' | 'total_tokens' | 'provider_source' | 'usage_source'
+  >
+): { record: CallUsageRecord; pricing: ProviderPricingEntry } {
+  const pricing = getProviderPricing(providerType, call.model);
+  const input_cost_usd = Number(((call.input_tokens / 1_000_000) * pricing.input).toFixed(8));
+  const output_cost_usd = Number(((call.output_tokens / 1_000_000) * pricing.output).toFixed(8));
+  const reasoning_cost_usd = Number(((call.reasoning_tokens / 1_000_000) * pricing.reasoning).toFixed(8));
+  const cost_usd = Number((input_cost_usd + output_cost_usd + reasoning_cost_usd).toFixed(6));
+
+  return {
+    pricing,
+    record: {
+      role: call.role,
+      requested_model: call.requested_model,
+      model: pricing.model,
+      input_tokens: call.input_tokens,
+      output_tokens: call.output_tokens,
+      reasoning_tokens: call.reasoning_tokens,
+      total_tokens: call.total_tokens,
+      input_cost_usd,
+      output_cost_usd,
+      reasoning_cost_usd,
+      cost_usd,
+      billing_basis: 'estimated_from_provider_usage_and_profile_rates',
+      cost_estimation_status: 'estimated_only_not_provider_billed',
+      provider_billed_cost_reported: false,
+      provider_source: call.provider_source,
+      usage_source: call.usage_source,
+    },
+  };
+}
+
+function summarizeCallsForBucket(
+  providerType: LiveProviderType,
+  calls: CallUsageRecord[]
+): BucketCostSummary {
+  const models: Record<string, ModelCostBreakdownEntry> = {};
+  let totalInput = 0;
+  let totalOutput = 0;
+  let totalReasoning = 0;
+  let totalTokens = 0;
+  let totalInputCost = 0;
+  let totalOutputCost = 0;
+  let totalReasoningCost = 0;
+  let totalCostUsd = 0;
+
+  for (const rawCall of calls) {
+    const { record, pricing } = resolveCallCostBreakdown(providerType, rawCall);
+    totalInput += record.input_tokens;
+    totalOutput += record.output_tokens;
+    totalReasoning += record.reasoning_tokens;
+    totalTokens += record.total_tokens;
+    totalInputCost += record.input_cost_usd;
+    totalOutputCost += record.output_cost_usd;
+    totalReasoningCost += record.reasoning_cost_usd;
+    totalCostUsd += record.cost_usd;
+
+    const existing = models[record.model];
+    if (!existing) {
+      models[record.model] = {
+        model: record.model,
+        calls: 1,
+        input_tokens: record.input_tokens,
+        output_tokens: record.output_tokens,
+        reasoning_tokens: record.reasoning_tokens,
+        total_tokens: record.total_tokens,
+        input_cost_usd: Number(record.input_cost_usd.toFixed(8)),
+        output_cost_usd: Number(record.output_cost_usd.toFixed(8)),
+        reasoning_cost_usd: Number(record.reasoning_cost_usd.toFixed(8)),
+        total_cost_usd: Number(record.cost_usd.toFixed(6)),
+        pricing_source: pricing.pricing_source,
+        pricing_last_updated: pricing.pricing_last_updated,
+        input_cost_per_million: pricing.input,
+        output_cost_per_million: pricing.output,
+        reasoning_cost_per_million: pricing.reasoning,
+        billing_basis: 'estimated_from_provider_usage_and_profile_rates',
+        cost_estimation_status: 'estimated_only_not_provider_billed',
+        provider_billed_cost_reported: false,
+      };
+    } else {
+      existing.calls += 1;
+      existing.input_tokens += record.input_tokens;
+      existing.output_tokens += record.output_tokens;
+      existing.reasoning_tokens += record.reasoning_tokens;
+      existing.total_tokens += record.total_tokens;
+      existing.input_cost_usd = Number((existing.input_cost_usd + record.input_cost_usd).toFixed(8));
+      existing.output_cost_usd = Number((existing.output_cost_usd + record.output_cost_usd).toFixed(8));
+      existing.reasoning_cost_usd = Number((existing.reasoning_cost_usd + record.reasoning_cost_usd).toFixed(8));
+      existing.total_cost_usd = Number((existing.total_cost_usd + record.cost_usd).toFixed(6));
+    }
+  }
+
+  return {
+    calls: calls.length,
+    input_tokens: totalInput,
+    output_tokens: totalOutput,
+    reasoning_tokens: totalReasoning,
+    total_tokens: totalTokens,
+    input_cost_usd: Number(totalInputCost.toFixed(8)),
+    output_cost_usd: Number(totalOutputCost.toFixed(8)),
+    reasoning_cost_usd: Number(totalReasoningCost.toFixed(8)),
+    total_cost_usd: Number(totalCostUsd.toFixed(6)),
+    models,
+  };
+}
+
+export function aggregateCallCostRecords(
+  providerType: LiveProviderType,
+  buckets: {
+    baseline: CallUsageRecord[];
+    ael: CallUsageRecord[];
+    verifiers: CallUsageRecord[];
+  }
+): {
+  per_model_cost_breakdown: Record<string, ModelCostBreakdownEntry>;
+  bucket_breakdown: BucketBreakdown;
+} {
+  const baselineSummary = summarizeCallsForBucket(providerType, buckets.baseline);
+  const aelSummary = summarizeCallsForBucket(providerType, buckets.ael);
+  const verifiersSummary = summarizeCallsForBucket(providerType, buckets.verifiers);
+  const allSummary = summarizeCallsForBucket(providerType, [
+    ...buckets.baseline,
+    ...buckets.ael,
+    ...buckets.verifiers,
+  ]);
+
+  return {
+    per_model_cost_breakdown: allSummary.models,
+    bucket_breakdown: {
+      baseline: baselineSummary,
+      ael: aelSummary,
+      verifiers: verifiersSummary,
+    },
   };
 }
 

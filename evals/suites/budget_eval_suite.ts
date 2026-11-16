@@ -17,17 +17,19 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BudgetEngine } from '../../src/engines/budget.js';
-import { LLMClient } from '../../src/llm/client.js';
+import { CallUsageRecord, LLMClient } from '../../src/llm/client.js';
 import { DecisionLogStore } from '../../src/db/decision_log.js';
 import { CircuitBreakerController } from '../../src/engines/circuit_breaker.js';
 import { DEFAULT_PRESETS, ProviderProfile } from '../../src/config/ael_config.js';
 import {
   LiveProviderType,
   MAX_LIVE_EVAL_COST_USD,
+  aggregateCallCostRecords,
   assertWithinSpendingGuard,
   buildLiveProviderProfile,
   estimateProjectedEvalCost,
   getProviderPricing,
+  resolveCallCostBreakdown,
   resolveLiveProviderProfile,
 } from './spending_guard.js';
 import {
@@ -55,6 +57,14 @@ export interface BudgetEvalOptions {
   maxCostUsd?: number;
   limit?: number;
   model?: string;
+  useProfileModelTiers?: boolean;
+  models?: {
+    baseline_model?: string;
+    probe_model?: string;
+    sample_model?: string;
+    judge_model?: string;
+    verifier_model?: string;
+  };
 }
 
 export interface CategoryMetric {
@@ -884,8 +894,16 @@ export function projectBudgetEvalCost(
 async function verifyCaseOutput(
   tc: EvalQueryCase,
   responseText: string,
-  llm: LLMClient
-): Promise<{ passed: boolean; errored: boolean; method: VerificationMethod; extraCostUsd: number; extraTokens: number }> {
+  llm: LLMClient,
+  verifierModel?: string
+): Promise<{
+  passed: boolean;
+  errored: boolean;
+  method: VerificationMethod;
+  extraCostUsd: number;
+  extraTokens: number;
+  callRecord?: CallUsageRecord;
+}> {
   try {
     if (tc.category === 'math') {
       const res = verifyMathNumericMatch(responseText, tc.expected_number!, tc.tolerance ?? 0.01);
@@ -900,7 +918,13 @@ async function verifyCaseOutput(
       return { passed: res.passed, errored: false, method: res.method, extraCostUsd: 0, extraTokens: 0 };
     }
 
-    const judgeOut = await verifyReasoningJudgeVerdict(llm, tc.query, tc.expected_sub || '', responseText);
+    const judgeOut = await verifyReasoningJudgeVerdict(
+      llm,
+      tc.query,
+      tc.expected_sub || '',
+      responseText,
+      verifierModel ? { model: verifierModel } : {}
+    );
     if (judgeOut.provider_source === 'unit_test' || (judgeOut.judgeTokens > 0 && judgeOut.usage_source !== 'provider_reported')) {
       throw new Error(
         `[AEL Benchmark Integrity Error] Judge verifier used non-live source (${judgeOut.provider_source}/${judgeOut.usage_source}).`
@@ -912,9 +936,13 @@ async function verifyCaseOutput(
       method: judgeOut.result.method,
       extraCostUsd: judgeOut.judgeCostUsd,
       extraTokens: judgeOut.judgeTokens,
+      callRecord: judgeOut.callRecord,
     };
   } catch (err) {
-    if (err instanceof Error && err.message.includes('Benchmark Integrity Error')) {
+    if (
+      err instanceof Error &&
+      (err.message.includes('Benchmark Integrity Error') || err.message.includes('AEL Pricing Error'))
+    ) {
       throw err;
     }
     return {
@@ -951,7 +979,7 @@ export async function runBudgetEvalSuite(
   const projected = projectBudgetEvalCost(split, provider, effectiveLimit);
   assertWithinSpendingGuard(projected.projectedCostUsd, maxCostUsd, `budget_eval_suite(${split}):preflight`);
 
-  const llm = new LLMClient(provider);
+  const llm = new LLMClient(provider, getProviderPricing);
   const circuitBreaker = new CircuitBreakerController(
     { enabled: true, rolling_window: 20, min_net_savings_usd: 0, max_error_rate: 0.2 },
     logStore
@@ -991,6 +1019,11 @@ export async function runBudgetEvalSuite(
     extraction: { baselineTok: 0, actualTok: 0, baseCost: 0, actCost: 0, verificationCost: 0, baseCorrect: 0, correct: 0, total: 0, overheads: [] },
   };
 
+  const providerType = provider.type as LiveProviderType;
+  const baselineCalls: CallUsageRecord[] = [];
+  const aelCalls: CallUsageRecord[] = [];
+  const verifierCalls: CallUsageRecord[] = [];
+
   let cumulativeCostUsd = 0;
   let baselineInputTokens = 0;
   let baselineOutputTokens = 0;
@@ -1009,13 +1042,30 @@ export async function runBudgetEvalSuite(
     const categoryKey = tc.category;
 
     // 1. Measure real baseline output (fixed high reasoning effort, no adaptive AEL routing)
-    const baselineRes = await llm.complete(tc.query, { reasoning_effort: 'high' });
+    const baselineRequestedModel = options.models?.baseline_model || provider.default_model;
+    const baselineRes = await llm.complete(tc.query, {
+      ...(options.models?.baseline_model ? { model: options.models.baseline_model } : {}),
+      reasoning_effort: 'high',
+    });
     if (baselineRes.provider_source === 'unit_test' || baselineRes.usage_source !== 'provider_reported') {
       throw new Error(
         `[AEL Benchmark Integrity Error] Unit-test double detected in baseline call (${baselineRes.provider_source}/${baselineRes.usage_source}).`
       );
     }
-    cumulativeCostUsd += baselineRes.cost_usd;
+    const resolvedBaselineCall = resolveCallCostBreakdown(providerType, {
+      role: 'baseline',
+      requested_model: baselineRes.requested_model || baselineRequestedModel,
+      model: baselineRes.model,
+      input_tokens: baselineRes.input_tokens,
+      output_tokens: baselineRes.output_tokens,
+      reasoning_tokens: baselineRes.reasoning_tokens,
+      total_tokens: baselineRes.total_tokens,
+      provider_source: baselineRes.provider_source,
+      usage_source: baselineRes.usage_source,
+    }).record;
+    baselineCalls.push(resolvedBaselineCall);
+
+    cumulativeCostUsd += resolvedBaselineCall.cost_usd;
     baselineInputTokens += baselineRes.input_tokens;
     baselineOutputTokens += baselineRes.output_tokens;
     baselineReasoningTokens += baselineRes.reasoning_tokens;
@@ -1025,9 +1075,17 @@ export async function runBudgetEvalSuite(
       workflow_id: `eval_${split}`,
       task_category: categoryKey,
       policy: DEFAULT_PRESETS.balanced,
+      use_profile_model_tiers: options.useProfileModelTiers,
+      models: options.models
+        ? {
+            probe_model: options.models.probe_model,
+            sample_model: options.models.sample_model,
+            judge_model: options.models.judge_model,
+          }
+        : undefined,
       reference_baseline: {
         total_tokens: baselineRes.total_tokens,
-        cost_usd: baselineRes.cost_usd,
+        cost_usd: resolvedBaselineCall.cost_usd,
       },
     });
     if (res.provider_source === 'unit_test' || res.usage_source !== 'provider_reported') {
@@ -1035,26 +1093,35 @@ export async function runBudgetEvalSuite(
         `[AEL Benchmark Integrity Error] Unit-test double detected in AEL call (${res.provider_source}/${res.usage_source}).`
       );
     }
-    cumulativeCostUsd += res.total_cost_usd;
+    const resolvedAelCaseCalls = res.calls.map(c => resolveCallCostBreakdown(providerType, c).record);
+    aelCalls.push(...resolvedAelCaseCalls);
+    const resolvedAelCaseCost = Number(resolvedAelCaseCalls.reduce((s, c) => s + c.cost_usd, 0).toFixed(6));
+
+    cumulativeCostUsd += resolvedAelCaseCost;
     aelInputTokens += res.input_tokens;
     aelOutputTokens += res.output_tokens;
     aelReasoningTokens += res.reasoning_tokens;
 
     // 3. Apply identical real per-category verifier to both baseline and AEL responses
-    const baseCheck = await verifyCaseOutput(tc, baselineRes.text, llm);
-    const aelCheck = await verifyCaseOutput(tc, res.text, llm);
+    const baseCheck = await verifyCaseOutput(tc, baselineRes.text, llm, options.models?.verifier_model);
+    const aelCheck = await verifyCaseOutput(tc, res.text, llm, options.models?.verifier_model);
     methodsUsed.add(baseCheck.method);
     methodsUsed.add(aelCheck.method);
     verifierTotalTokens += baseCheck.extraTokens + aelCheck.extraTokens;
 
+    let verificationCostUsd = 0;
     for (const chk of [baseCheck, aelCheck]) {
       totalVerifications++;
       if (chk.errored) erroredVerifications++;
       else if (chk.passed) passedVerifications++;
       else failedVerifications++;
+      if (chk.callRecord) {
+        const resolvedVerifCall = resolveCallCostBreakdown(providerType, chk.callRecord).record;
+        verifierCalls.push(resolvedVerifCall);
+        verificationCostUsd += resolvedVerifCall.cost_usd;
+      }
     }
-
-    const verificationCostUsd = baseCheck.extraCostUsd + aelCheck.extraCostUsd;
+    verificationCostUsd = Number(verificationCostUsd.toFixed(6));
     cumulativeCostUsd += verificationCostUsd;
 
     assertWithinSpendingGuard(cumulativeCostUsd, maxCostUsd, `budget_eval_suite(${split}):runtime`);
@@ -1064,8 +1131,8 @@ export async function runBudgetEvalSuite(
       stat.total++;
       stat.baselineTok += res.baseline_tokens;
       stat.actualTok += res.total_tokens;
-      stat.baseCost += res.baseline_cost_usd;
-      stat.actCost += res.total_cost_usd;
+      stat.baseCost += resolvedBaselineCall.cost_usd;
+      stat.actCost += resolvedAelCaseCost;
       stat.verificationCost += verificationCostUsd;
       stat.overheads.push(res.ael_overhead_ms);
       if (baseCheck.passed) stat.baseCorrect++;
@@ -1176,6 +1243,11 @@ export async function runBudgetEvalSuite(
   );
   const datasetHash = computeDatasetHash(testCases);
   const pricingProvenance = getProviderPricing(provider.type as LiveProviderType, provider.default_model);
+  const aggregatedCosts = aggregateCallCostRecords(providerType, {
+    baseline: baselineCalls,
+    ael: aelCalls,
+    verifiers: verifierCalls,
+  });
 
   const result: BudgetEvalResult = {
     suite_name: `AERA/CoBa Thinking Budget Comparative Benchmark (${split.toUpperCase()})`,
@@ -1247,6 +1319,7 @@ export async function runBudgetEvalSuite(
       provider_billed_cost_reported: false,
       usage_source: 'provider_reported',
       currency: 'USD',
+      accounting_granularity: 'per_call_actual_model',
       pricing_model: pricingProvenance.model,
       pricing_source: pricingProvenance.pricing_source,
       pricing_last_updated: pricingProvenance.pricing_last_updated,
@@ -1254,6 +1327,8 @@ export async function runBudgetEvalSuite(
       output_cost_per_million: pricingProvenance.output,
       reasoning_cost_per_million: pricingProvenance.reasoning,
       verification_cost_excluded_from_product_savings: true,
+      per_model_cost_breakdown: aggregatedCosts.per_model_cost_breakdown,
+      bucket_breakdown: aggregatedCosts.bucket_breakdown,
     },
     savings_claims_valid: passedAcceptance,
     acceptance_status: acceptanceStatus,

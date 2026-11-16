@@ -6,7 +6,7 @@
  */
 
 import crypto from 'node:crypto';
-import { LLMClient, LLMResponse } from '../llm/client.js';
+import { CallRole, CallUsageRecord, LLMClient, LLMResponse } from '../llm/client.js';
 import { DecisionLogStore } from '../db/decision_log.js';
 import { CircuitBreakerController } from './circuit_breaker.js';
 import { PresetPolicy } from '../config/ael_config.js';
@@ -40,6 +40,7 @@ export interface BudgetRoutingResult {
   provider_source: LLMResponse['provider_source'];
   model: string;
   usage_source: LLMResponse['usage_source'];
+  calls: CallUsageRecord[];
 }
 
 export class BudgetEngine {
@@ -58,6 +59,13 @@ export class BudgetEngine {
       task_category?: string;
       policy?: PresetPolicy;
       pass_through?: boolean;
+      use_profile_model_tiers?: boolean;
+      models?: {
+        probe_model?: string;
+        sample_model?: string;
+        judge_model?: string;
+        pass_through_model?: string;
+      };
       reference_baseline?: { total_tokens: number; cost_usd: number };
     } = {}
   ): Promise<BudgetRoutingResult> {
@@ -66,6 +74,7 @@ export class BudgetEngine {
     const task_category = options.task_category || 'general';
     const policy = options.policy || this.defaultPolicy;
     const query_hash = crypto.createHash('sha256').update(prompt).digest('hex').substring(0, 16);
+    const profile = this.llm.getProfile();
 
     // Check Circuit Breaker (using unfloored historical comparative savings & error rate)
     const breakerStatus = this.circuitBreaker.isTripped(workflow_id);
@@ -80,7 +89,8 @@ export class BudgetEngine {
         task_category,
         startTime,
         breakerStatus.tripped,
-        options.reference_baseline
+        options.reference_baseline,
+        options.models?.pass_through_model ?? (options.use_profile_model_tiers ? profile.default_model : undefined)
       );
     }
 
@@ -104,13 +114,39 @@ export class BudgetEngine {
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
     let totalReasoningTokens = 0;
+    const calls: CallUsageRecord[] = [];
+
+    const toCallRecord = (role: CallRole, requestedModel: string, res: LLMResponse): CallUsageRecord => ({
+      role,
+      requested_model: res.requested_model || requestedModel,
+      model: res.model,
+      input_tokens: res.input_tokens,
+      output_tokens: res.output_tokens,
+      reasoning_tokens: res.reasoning_tokens,
+      total_tokens: res.total_tokens,
+      input_cost_usd: res.input_cost_usd,
+      output_cost_usd: res.output_cost_usd,
+      reasoning_cost_usd: res.reasoning_cost_usd,
+      cost_usd: res.cost_usd,
+      billing_basis: 'estimated_from_provider_usage_and_profile_rates',
+      cost_estimation_status: 'estimated_only_not_provider_billed',
+      provider_billed_cost_reported: false,
+      provider_source: res.provider_source,
+      usage_source: res.usage_source,
+    });
 
     // STEP 1: CHEAP FIRST PROBE (Lowest inference budget)
     const initialEffort = policy.initial_reasoning_effort;
-    const probeResponse = await this.llm.complete(prompt, { reasoning_effort: initialEffort });
+    const probeModel =
+      options.models?.probe_model ?? (options.use_profile_model_tiers ? profile.cheap_model : undefined);
+    const probeResponse = await this.llm.complete(prompt, {
+      ...(probeModel ? { model: probeModel } : {}),
+      reasoning_effort: initialEffort,
+    });
 
+    calls.push(toCallRecord('ael_probe', probeModel || profile.default_model, probeResponse));
     upstreamTokens += probeResponse.total_tokens;
-    upstreamCost += probeResponse.cost_usd;
+    upstreamCost = Number((upstreamCost + probeResponse.cost_usd).toFixed(6));
     totalInputTokens += probeResponse.input_tokens;
     totalOutputTokens += probeResponse.output_tokens;
     totalReasoningTokens += probeResponse.reasoning_tokens;
@@ -134,14 +170,18 @@ export class BudgetEngine {
       // REGIME: SAMPLE (Self-Consistency Consensus Probe across k samples)
       aelOverheadMs += performance.now() - decisionStep1Start;
       const k = Math.min(policy.k_samples, 3);
+      const sampleModel =
+        options.models?.sample_model ?? (options.use_profile_model_tiers ? profile.default_model : undefined);
       for (let i = 1; i < k; i++) {
         const sampleRes = await this.llm.complete(prompt, {
+          ...(sampleModel ? { model: sampleModel } : {}),
           reasoning_effort: initialEffort,
           temperature: 0.7,
         });
         samplesCount++;
+        calls.push(toCallRecord('ael_sample', sampleModel || profile.default_model, sampleRes));
         upstreamTokens += sampleRes.total_tokens;
-        upstreamCost += sampleRes.cost_usd;
+        upstreamCost = Number((upstreamCost + sampleRes.cost_usd).toFixed(6));
         totalInputTokens += sampleRes.input_tokens;
         totalOutputTokens += sampleRes.output_tokens;
         totalReasoningTokens += sampleRes.reasoning_tokens;
@@ -191,11 +231,17 @@ export class BudgetEngine {
       const judgePrompt = `EVALUATE EVIDENCE AND RESOLVE QUERY:\nTask: ${prompt}\nPreliminary Candidates:\n${candidateAnswers.join('\n---\n')}`;
       aelOverheadMs += performance.now() - escalateDecisionStart;
 
-      const judgeRes = await this.llm.complete(judgePrompt, { reasoning_effort: finalEffort });
+      const judgeModel =
+        options.models?.judge_model ?? (options.use_profile_model_tiers ? profile.reasoning_model : undefined);
+      const judgeRes = await this.llm.complete(judgePrompt, {
+        ...(judgeModel ? { model: judgeModel } : {}),
+        reasoning_effort: finalEffort,
+      });
 
       const judgePostStart = performance.now();
+      calls.push(toCallRecord('ael_judge', judgeModel || profile.default_model, judgeRes));
       aelInternalTokens += judgeRes.total_tokens;
-      aelInternalCost += judgeRes.cost_usd;
+      aelInternalCost = Number((aelInternalCost + judgeRes.cost_usd).toFixed(6));
       totalInputTokens += judgeRes.input_tokens;
       totalOutputTokens += judgeRes.output_tokens;
       totalReasoningTokens += judgeRes.reasoning_tokens;
@@ -209,7 +255,7 @@ export class BudgetEngine {
     const finalAelOverheadMs = Math.max(0, Math.round(aelOverheadMs));
 
     const actualTotalTokens = upstreamTokens + aelInternalTokens;
-    const actualTotalCost = upstreamCost + aelInternalCost;
+    const actualTotalCost = Number(calls.reduce((sum, c) => sum + c.cost_usd, 0).toFixed(6));
 
     // Comparative net savings are computed ONLY in comparative_benchmark mode (never counterfactual per-request).
     // In actual_only live mode, baseline and savings are zero and actual consumption is logged.
@@ -281,6 +327,7 @@ export class BudgetEngine {
       provider_source: finalResponse.provider_source,
       model: finalResponse.model,
       usage_source: finalResponse.usage_source,
+      calls,
     };
   }
 
@@ -316,16 +363,38 @@ export class BudgetEngine {
     task_category: string,
     startTime: number,
     circuitBreakerTripped: boolean,
-    referenceBaseline?: { total_tokens: number; cost_usd: number }
+    referenceBaseline?: { total_tokens: number; cost_usd: number },
+    requestedModel?: string
   ): Promise<BudgetRoutingResult> {
     // Pass-through: uses baseline high effort directly; live requests report actual consumption only
-    const response = await this.llm.complete(prompt, { reasoning_effort: 'high' });
+    const response = await this.llm.complete(prompt, {
+      ...(requestedModel ? { model: requestedModel } : {}),
+      reasoning_effort: 'high',
+    });
     const latency_ms = Date.now() - startTime;
     const hasRef = referenceBaseline !== undefined;
     const baselineTotalTokens = hasRef ? referenceBaseline!.total_tokens : 0;
     const baselineCostUsd = hasRef ? referenceBaseline!.cost_usd : 0;
     const netTokensSaved = hasRef ? baselineTotalTokens - response.total_tokens : 0;
     const netCostSavedUsd = hasRef ? Number((baselineCostUsd - response.cost_usd).toFixed(6)) : 0;
+    const passCall: CallUsageRecord = {
+      role: 'ael_passthrough',
+      requested_model: response.requested_model || requestedModel || this.llm.getProfile().default_model,
+      model: response.model,
+      input_tokens: response.input_tokens,
+      output_tokens: response.output_tokens,
+      reasoning_tokens: response.reasoning_tokens,
+      total_tokens: response.total_tokens,
+      input_cost_usd: response.input_cost_usd,
+      output_cost_usd: response.output_cost_usd,
+      reasoning_cost_usd: response.reasoning_cost_usd,
+      cost_usd: response.cost_usd,
+      billing_basis: 'estimated_from_provider_usage_and_profile_rates',
+      cost_estimation_status: 'estimated_only_not_provider_billed',
+      provider_billed_cost_reported: false,
+      provider_source: response.provider_source,
+      usage_source: response.usage_source,
+    };
 
     this.logStore.insertDecision({
       id: crypto.randomUUID(),
@@ -391,6 +460,7 @@ export class BudgetEngine {
       provider_source: response.provider_source,
       model: response.model,
       usage_source: response.usage_source,
+      calls: [passCall],
     };
   }
 }

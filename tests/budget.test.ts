@@ -125,4 +125,83 @@ describe('Budget Engine & Circuit Breaker', () => {
     expect(breakerCheck.tripped).toBe(true);
     expect(breakerCheck.reason).toContain('Negative net token savings');
   });
+
+  it('aggregates exact per-call costs across three deliberately differently priced models in BudgetEngine (P0-23)', async () => {
+    const multiLlm = createUnitTestLLMClient(
+      {
+        default_model: 'tier-default-model',
+        cheap_model: 'tier-cheap-model',
+        reasoning_model: 'tier-reasoning-model',
+        input_cost_per_million: 1.0,
+        output_cost_per_million: 2.0,
+        reasoning_cost_per_million: 4.0,
+        model_pricing: {
+          'tier-cheap-model': {
+            input_cost_per_million: 0.25,
+            output_cost_per_million: 0.5,
+            reasoning_cost_per_million: 1.0,
+          },
+          'tier-default-model': {
+            input_cost_per_million: 1.0,
+            output_cost_per_million: 2.0,
+            reasoning_cost_per_million: 4.0,
+          },
+          'tier-reasoning-model': {
+            input_cost_per_million: 5.0,
+            output_cost_per_million: 10.0,
+            reasoning_cost_per_million: 20.0,
+          },
+        },
+      },
+      (() => {
+        let callIndex = 0;
+        return (prompt: string, options: { model?: string; temperature?: number }) => {
+          callIndex++;
+          if (prompt.includes('EVALUATE EVIDENCE')) {
+            return {
+              text: 'Resolved final theorem proof',
+              model: options.model,
+              input_tokens: 1200,
+              output_tokens: 400,
+              reasoning_tokens: 800,
+            };
+          }
+          const labels = ['alpha', 'beta', 'gamma'];
+          const tag = labels[(callIndex - 1) % labels.length];
+          return {
+            text: `answer_${tag}_${callIndex}`,
+            model: options.model,
+            input_tokens: 1000,
+            output_tokens: 200,
+            reasoning_tokens: 100,
+          };
+        };
+      })()
+    );
+
+    const multiEngine = new BudgetEngine(multiLlm, logStore, circuitBreaker, DEFAULT_PRESETS.quality_first);
+    const res = await multiEngine.routeAndExecute('Calculate complex theorem proof', {
+      workflow_id: 'multi_model_wf',
+      task_category: 'math',
+      use_profile_model_tiers: true,
+    });
+
+    // quality_first: k_samples=3 -> 1 probe (cheap), 2 samples (default), 1 judge (reasoning)
+    expect(res.calls.length).toBe(4);
+    expect(res.calls[0].role).toBe('ael_probe');
+    expect(res.calls[0].model).toBe('tier-cheap-model');
+    expect(res.calls[1].role).toBe('ael_sample');
+    expect(res.calls[1].model).toBe('tier-default-model');
+    expect(res.calls[2].role).toBe('ael_sample');
+    expect(res.calls[2].model).toBe('tier-default-model');
+    expect(res.calls[3].role).toBe('ael_judge');
+    expect(res.calls[3].model).toBe('tier-reasoning-model');
+
+    const manualSum = Number(res.calls.reduce((sum, c) => sum + c.cost_usd, 0).toFixed(6));
+    expect(res.total_cost_usd).toBe(manualSum);
+    expect(res.calls[0].cost_usd).toBeCloseTo(0.00045, 6);
+    expect(res.calls[1].cost_usd).toBeCloseTo(0.0018, 6);
+    expect(res.calls[3].cost_usd).toBeCloseTo(0.026, 6);
+    expect(res.total_cost_usd).toBeCloseTo(0.00045 + 0.0018 + 0.0018 + 0.026, 6);
+  });
 });

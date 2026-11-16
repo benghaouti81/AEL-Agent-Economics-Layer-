@@ -18,6 +18,19 @@ export interface LLMRequestOptions {
   system_instruction?: string;
 }
 
+export interface ModelCostRates {
+  input: number;
+  output: number;
+  reasoning: number;
+  pricing_source?: string;
+  pricing_last_updated?: string;
+}
+
+export type PricingResolverFn = (
+  providerType: ProviderProfile['type'],
+  model: string
+) => ModelCostRates;
+
 export interface LLMResponse {
   text: string;
   input_tokens: number;
@@ -25,12 +38,45 @@ export interface LLMResponse {
   reasoning_tokens: number;
   total_tokens: number;
   cost_usd: number;
+  input_cost_usd: number;
+  output_cost_usd: number;
+  reasoning_cost_usd: number;
+  cost_estimation_status: 'estimated_only_not_provider_billed';
   latency_ms: number;
   model: string;
+  requested_model: string;
   logprob_confidence?: number;
   confidence_source: 'provider_logprobs' | 'unavailable';
   provider_source: 'openai' | 'anthropic' | 'gemini' | 'unit_test';
   usage_source: 'provider_reported' | 'unit_test';
+}
+
+export type CallRole =
+  | 'baseline'
+  | 'ael_probe'
+  | 'ael_sample'
+  | 'ael_judge'
+  | 'ael_passthrough'
+  | 'verifier'
+  | 'tool_selection';
+
+export interface CallUsageRecord {
+  role: CallRole;
+  requested_model: string;
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  reasoning_tokens: number;
+  total_tokens: number;
+  input_cost_usd: number;
+  output_cost_usd: number;
+  reasoning_cost_usd: number;
+  cost_usd: number;
+  billing_basis: 'estimated_from_provider_usage_and_profile_rates';
+  cost_estimation_status: 'estimated_only_not_provider_billed';
+  provider_billed_cost_reported: false;
+  provider_source: LLMResponse['provider_source'];
+  usage_source: LLMResponse['usage_source'];
 }
 
 export const MAX_GEMINI_RATE_LIMIT_ATTEMPTS = 5;
@@ -150,7 +196,10 @@ export class LLMClient {
   private geminiInitError: Error | null = null;
   private geminiInitKey: string | null = null;
 
-  constructor(private profile: ProviderProfile) {
+  constructor(
+    private profile: ProviderProfile,
+    private pricingResolver?: PricingResolverFn
+  ) {
     if (profile.type === 'gemini') {
       const apiKey = process.env[profile.api_key_env] || (profile.api_key_env === 'GEMINI_API_KEY' ? process.env.GEMINI_API_KEY : undefined);
       if (!isPlaceholderOrEmptyKey(apiKey)) {
@@ -313,7 +362,8 @@ export class LLMClient {
         : summedTotal;
 
     const latency_ms = Date.now() - startTime;
-    const cost_usd = this.calculateCost(input_tokens, output_tokens, reasoning_tokens);
+    const actualModel = typeof data.model === 'string' && data.model.trim() ? data.model.trim() : model;
+    const costBreakdown = this.calculateCostBreakdown(input_tokens, output_tokens, reasoning_tokens, actualModel);
 
     const logprobContent = data.choices?.[0]?.logprobs?.content;
     let logprob_confidence: number | undefined;
@@ -335,9 +385,14 @@ export class LLMClient {
       output_tokens,
       reasoning_tokens,
       total_tokens,
-      cost_usd,
+      cost_usd: costBreakdown.cost_usd,
+      input_cost_usd: costBreakdown.input_cost_usd,
+      output_cost_usd: costBreakdown.output_cost_usd,
+      reasoning_cost_usd: costBreakdown.reasoning_cost_usd,
+      cost_estimation_status: 'estimated_only_not_provider_billed',
       latency_ms,
-      model: typeof data.model === 'string' && data.model.trim() ? data.model.trim() : model,
+      model: actualModel,
+      requested_model: model,
       ...(logprob_confidence !== undefined ? { logprob_confidence } : {}),
       confidence_source,
       provider_source: 'openai',
@@ -413,7 +468,8 @@ export class LLMClient {
 
     const total_tokens = input_tokens + output_tokens + reasoning_tokens;
     const latency_ms = Date.now() - startTime;
-    const cost_usd = this.calculateCost(input_tokens, output_tokens, reasoning_tokens);
+    const actualModel = typeof data.model === 'string' && data.model.trim() ? data.model.trim() : model;
+    const costBreakdown = this.calculateCostBreakdown(input_tokens, output_tokens, reasoning_tokens, actualModel);
 
     return {
       text,
@@ -421,9 +477,14 @@ export class LLMClient {
       output_tokens,
       reasoning_tokens,
       total_tokens,
-      cost_usd,
+      cost_usd: costBreakdown.cost_usd,
+      input_cost_usd: costBreakdown.input_cost_usd,
+      output_cost_usd: costBreakdown.output_cost_usd,
+      reasoning_cost_usd: costBreakdown.reasoning_cost_usd,
+      cost_estimation_status: 'estimated_only_not_provider_billed',
       latency_ms,
-      model: typeof data.model === 'string' && data.model.trim() ? data.model.trim() : model,
+      model: actualModel,
+      requested_model: model,
       confidence_source: 'unavailable',
       provider_source: 'anthropic',
       usage_source: 'provider_reported',
@@ -589,7 +650,9 @@ export class LLMClient {
       typeof usage.totalTokenCount === 'number' && Number.isFinite(usage.totalTokenCount) ? usage.totalTokenCount : 0
     );
     const latency_ms = Date.now() - startTime;
-    const cost_usd = this.calculateCost(input_tokens, output_tokens, reasoning_tokens);
+    const rawVersion = typeof (response as any).modelVersion === 'string' ? (response as any).modelVersion.trim() : '';
+    const actualModel = (rawVersion || model).replace(/^models\//i, '');
+    const costBreakdown = this.calculateCostBreakdown(input_tokens, output_tokens, reasoning_tokens, actualModel);
 
     const avgLogprobs = (response as any).candidates?.[0]?.avgLogprobs;
     let logprob_confidence: number | undefined;
@@ -605,9 +668,14 @@ export class LLMClient {
       output_tokens,
       reasoning_tokens,
       total_tokens,
-      cost_usd,
+      cost_usd: costBreakdown.cost_usd,
+      input_cost_usd: costBreakdown.input_cost_usd,
+      output_cost_usd: costBreakdown.output_cost_usd,
+      reasoning_cost_usd: costBreakdown.reasoning_cost_usd,
+      cost_estimation_status: 'estimated_only_not_provider_billed',
       latency_ms,
-      model,
+      model: actualModel,
+      requested_model: model,
       ...(logprob_confidence !== undefined ? { logprob_confidence } : {}),
       confidence_source,
       provider_source: 'gemini',
@@ -615,10 +683,66 @@ export class LLMClient {
     };
   }
 
-  public calculateCost(inputTokens: number, outputTokens: number, reasoningTokens: number = 0): number {
-    const inputCost = (inputTokens / 1_000_000) * this.profile.input_cost_per_million;
-    const outputCost = (outputTokens / 1_000_000) * this.profile.output_cost_per_million;
-    const reasoningCost = (reasoningTokens / 1_000_000) * this.profile.reasoning_cost_per_million;
-    return Number((inputCost + outputCost + reasoningCost).toFixed(6));
+  public resolveModelRates(model?: string): ModelCostRates {
+    const normalizedDefault = this.profile.default_model.trim().replace(/^models\//i, '');
+    const targetModel = (model || this.profile.default_model).trim().replace(/^models\//i, '');
+
+    const configuredRates = this.profile.model_pricing?.[targetModel];
+    if (configuredRates) {
+      return {
+        input: configuredRates.input_cost_per_million,
+        output: configuredRates.output_cost_per_million,
+        reasoning: configuredRates.reasoning_cost_per_million,
+      };
+    }
+
+    if (this.pricingResolver) {
+      return this.pricingResolver(this.profile.type, targetModel);
+    }
+
+    if (targetModel === normalizedDefault) {
+      return {
+        input: this.profile.input_cost_per_million,
+        output: this.profile.output_cost_per_million,
+        reasoning: this.profile.reasoning_cost_per_million,
+      };
+    }
+
+    throw new Error(
+      `[AEL Pricing Error] Unknown or unconfigured pricing for model '${targetModel}' (provider='${this.profile.type}', primary default_model='${this.profile.default_model}'). Refusing to silently apply primary model rates.`
+    );
+  }
+
+  public calculateCostBreakdown(
+    inputTokens: number,
+    outputTokens: number,
+    reasoningTokens: number = 0,
+    model?: string
+  ): {
+    input_cost_usd: number;
+    output_cost_usd: number;
+    reasoning_cost_usd: number;
+    cost_usd: number;
+  } {
+    const rates = this.resolveModelRates(model);
+    const input_cost_usd = Number(((inputTokens / 1_000_000) * rates.input).toFixed(8));
+    const output_cost_usd = Number(((outputTokens / 1_000_000) * rates.output).toFixed(8));
+    const reasoning_cost_usd = Number(((reasoningTokens / 1_000_000) * rates.reasoning).toFixed(8));
+    const cost_usd = Number((input_cost_usd + output_cost_usd + reasoning_cost_usd).toFixed(6));
+    return {
+      input_cost_usd,
+      output_cost_usd,
+      reasoning_cost_usd,
+      cost_usd,
+    };
+  }
+
+  public calculateCost(
+    inputTokens: number,
+    outputTokens: number,
+    reasoningTokens: number = 0,
+    model?: string
+  ): number {
+    return this.calculateCostBreakdown(inputTokens, outputTokens, reasoningTokens, model).cost_usd;
   }
 }

@@ -8,7 +8,7 @@
 import crypto from 'node:crypto';
 import { ToolRegistry } from '../mcp/registry.js';
 import { DryRunSandbox, DryRunResult } from '../mcp/sandbox.js';
-import { LLMClient, LLMResponse } from '../llm/client.js';
+import { CallUsageRecord, LLMClient, LLMResponse } from '../llm/client.js';
 import { DecisionLogStore } from '../db/decision_log.js';
 import { DecisionRecord, ToolRecord } from '../models/contracts.js';
 
@@ -31,6 +31,7 @@ export interface ToolDCSelectionResult {
   provider_source?: LLMResponse['provider_source'];
   model?: string;
   usage_source?: LLMResponse['usage_source'];
+  calls?: CallUsageRecord[];
 }
 
 export class ToolDCEngine {
@@ -234,18 +235,39 @@ export class ToolDCEngine {
     let lastModel: string | undefined;
     let lastUsageSource: LLMResponse['usage_source'] | undefined;
     let dryRunCaughtError: string | null = null;
+    const calls: CallUsageRecord[] = [];
+    const defaultModel = this.llm.getProfile().default_model;
 
     // TRY - CHECK - RETRY FSM Loop
     while (retries <= maxRetries) {
       // Step 1: PROPOSE (Ask model to propose tool + exact args from focused batch)
       const prompt = this.buildSelectionPrompt(taskQuery, candidates, lastError);
       const llmRes = await this.llm.complete(prompt, { reasoning_effort: 'none' });
-      
+
+      calls.push({
+        role: 'tool_selection',
+        requested_model: llmRes.requested_model || defaultModel,
+        model: llmRes.model,
+        input_tokens: llmRes.input_tokens,
+        output_tokens: llmRes.output_tokens,
+        reasoning_tokens: llmRes.reasoning_tokens,
+        total_tokens: llmRes.total_tokens,
+        input_cost_usd: llmRes.input_cost_usd,
+        output_cost_usd: llmRes.output_cost_usd,
+        reasoning_cost_usd: llmRes.reasoning_cost_usd,
+        cost_usd: llmRes.cost_usd,
+        billing_basis: 'estimated_from_provider_usage_and_profile_rates',
+        cost_estimation_status: 'estimated_only_not_provider_billed',
+        provider_billed_cost_reported: false,
+        provider_source: llmRes.provider_source,
+        usage_source: llmRes.usage_source,
+      });
+
       ael_overhead_tokens += llmRes.total_tokens;
       ael_overhead_input_tokens += llmRes.input_tokens;
       ael_overhead_output_tokens += llmRes.output_tokens;
       ael_overhead_reasoning_tokens += llmRes.reasoning_tokens;
-      ael_overhead_cost += llmRes.cost_usd;
+      ael_overhead_cost = Number((ael_overhead_cost + llmRes.cost_usd).toFixed(6));
       lastProviderSource = llmRes.provider_source;
       lastModel = llmRes.model;
       lastUsageSource = llmRes.usage_source;
@@ -338,6 +360,7 @@ export class ToolDCEngine {
         provider_source: lastProviderSource,
         model: lastModel,
         usage_source: lastUsageSource,
+        calls,
       };
     }
 
@@ -401,6 +424,7 @@ export class ToolDCEngine {
       provider_source: lastProviderSource,
       model: lastModel,
       usage_source: lastUsageSource,
+      calls,
     };
   }
 
@@ -511,6 +535,26 @@ Output STRICT JSON ONLY in this format:
       provider_source: llmRes.provider_source,
       model: llmRes.model,
       usage_source: llmRes.usage_source,
+      calls: [
+        {
+          role: 'ael_passthrough',
+          requested_model: llmRes.requested_model || this.llm.getProfile().default_model,
+          model: llmRes.model,
+          input_tokens: llmRes.input_tokens,
+          output_tokens: llmRes.output_tokens,
+          reasoning_tokens: llmRes.reasoning_tokens,
+          total_tokens: llmRes.total_tokens,
+          input_cost_usd: llmRes.input_cost_usd,
+          output_cost_usd: llmRes.output_cost_usd,
+          reasoning_cost_usd: llmRes.reasoning_cost_usd,
+          cost_usd: llmRes.cost_usd,
+          billing_basis: 'estimated_from_provider_usage_and_profile_rates',
+          cost_estimation_status: 'estimated_only_not_provider_billed',
+          provider_billed_cost_reported: false,
+          provider_source: llmRes.provider_source,
+          usage_source: llmRes.usage_source,
+        },
+      ],
     };
   }
 

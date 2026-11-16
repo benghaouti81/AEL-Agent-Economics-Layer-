@@ -49,15 +49,22 @@ export class UnitTestLLMDouble extends LLMClient {
         const output_tokens = custom.output_tokens ?? 12;
         const reasoning_tokens = custom.reasoning_tokens ?? 0;
         const total_tokens = custom.total_tokens ?? input_tokens + output_tokens + reasoning_tokens;
+        const resolvedModel = custom.model ?? model;
+        const breakdown = this.calculateCostBreakdown(input_tokens, output_tokens, reasoning_tokens, resolvedModel);
         return {
           text: custom.text,
           input_tokens,
           output_tokens,
           reasoning_tokens,
           total_tokens,
-          cost_usd: custom.cost_usd ?? this.calculateCost(input_tokens, output_tokens, reasoning_tokens),
+          cost_usd: custom.cost_usd ?? breakdown.cost_usd,
+          input_cost_usd: custom.input_cost_usd ?? breakdown.input_cost_usd,
+          output_cost_usd: custom.output_cost_usd ?? breakdown.output_cost_usd,
+          reasoning_cost_usd: custom.reasoning_cost_usd ?? breakdown.reasoning_cost_usd,
+          cost_estimation_status: 'estimated_only_not_provider_billed',
           latency_ms: custom.latency_ms ?? 5,
-          model: custom.model ?? model,
+          model: resolvedModel,
+          requested_model: model,
           ...(custom.logprob_confidence !== undefined ? { logprob_confidence: custom.logprob_confidence } : {}),
           confidence_source: custom.confidence_source ?? 'unavailable',
           provider_source: 'unit_test',
@@ -120,6 +127,7 @@ export class UnitTestLLMDouble extends LLMClient {
 
     const output_tokens = Math.max(5, Math.ceil(text.length / 4));
     const total_tokens = input_tokens + output_tokens + reasoning_tokens;
+    const breakdown = this.calculateCostBreakdown(input_tokens, output_tokens, reasoning_tokens, model);
 
     return {
       text,
@@ -127,9 +135,14 @@ export class UnitTestLLMDouble extends LLMClient {
       output_tokens,
       reasoning_tokens,
       total_tokens,
-      cost_usd: this.calculateCost(input_tokens, output_tokens, reasoning_tokens),
+      cost_usd: breakdown.cost_usd,
+      input_cost_usd: breakdown.input_cost_usd,
+      output_cost_usd: breakdown.output_cost_usd,
+      reasoning_cost_usd: breakdown.reasoning_cost_usd,
+      cost_estimation_status: 'estimated_only_not_provider_billed',
       latency_ms: 5,
       model,
+      requested_model: model,
       confidence_source: 'unavailable',
       provider_source: 'unit_test',
       usage_source: 'unit_test',

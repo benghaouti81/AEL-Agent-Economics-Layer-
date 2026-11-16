@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { ToolRegistry } from '../../src/mcp/registry.js';
 import { DryRunSandbox } from '../../src/mcp/sandbox.js';
 import { ToolDCEngine } from '../../src/engines/tool_dc.js';
-import { LLMClient } from '../../src/llm/client.js';
+import { CallUsageRecord, LLMClient } from '../../src/llm/client.js';
 import { DecisionLogStore } from '../../src/db/decision_log.js';
 import { FILESYSTEM_TOOLS, MockFilesystemServer } from '../mock_servers/filesystem_server.js';
 import { SEARCH_TOOLS, MockSearchServer } from '../mock_servers/search_server.js';
@@ -22,10 +22,12 @@ import { ProviderProfile } from '../../src/config/ael_config.js';
 import {
   LiveProviderType,
   MAX_LIVE_EVAL_COST_USD,
+  aggregateCallCostRecords,
   assertWithinSpendingGuard,
   buildLiveProviderProfile,
   estimateProjectedEvalCost,
   getProviderPricing,
+  resolveCallCostBreakdown,
   resolveLiveProviderProfile,
 } from './spending_guard.js';
 import {
@@ -201,11 +203,13 @@ export async function runToolEvalSuite(
   const projected = projectToolEvalCost(provider, effectiveLimit);
   assertWithinSpendingGuard(projected.projectedCostUsd, maxCostUsd, 'tool_eval_suite:preflight');
 
-  const llm = new LLMClient(provider);
+  const llm = new LLMClient(provider, getProviderPricing);
   const toolDc = new ToolDCEngine(registry, sandbox, llm, logStore);
   const canonicalDataset = getToolEvalCanonicalCases(effectiveLimit);
   const testCases = canonicalDataset.selection_cases;
   const catchScenarios = canonicalDataset.catch_scenarios;
+  const providerType = provider.type as LiveProviderType;
+  const aelCalls: CallUsageRecord[] = [];
 
   const results: ToolEvalResult['cases'] = [];
   let successfulCount = 0;
@@ -233,7 +237,14 @@ export async function runToolEvalSuite(
       );
     }
 
-    cumulativeCostUsd += res.overhead_cost_usd;
+    const resolvedCalls = (res.calls || []).map(c => resolveCallCostBreakdown(providerType, c).record);
+    aelCalls.push(...resolvedCalls);
+    const resolvedCaseCost =
+      resolvedCalls.length > 0
+        ? resolvedCalls.reduce((s, c) => s + c.cost_usd, 0)
+        : res.overhead_cost_usd;
+
+    cumulativeCostUsd += resolvedCaseCost;
     assertWithinSpendingGuard(cumulativeCostUsd, maxCostUsd, 'tool_eval_suite:runtime');
 
     aelInputTokens += res.overhead_input_tokens;
@@ -354,6 +365,11 @@ export async function runToolEvalSuite(
 
   const datasetHash = computeDatasetHash(canonicalDataset);
   const pricingProvenance = getProviderPricing(provider.type as LiveProviderType, provider.default_model);
+  const aggregatedCosts = aggregateCallCostRecords(providerType, {
+    baseline: [],
+    ael: aelCalls,
+    verifiers: [],
+  });
 
   const evalResult: ToolEvalResult = {
     suite_name: 'Tool-DC Verification & Safety Suite',
@@ -414,6 +430,7 @@ export async function runToolEvalSuite(
       provider_billed_cost_reported: false,
       usage_source: 'provider_reported',
       currency: 'USD',
+      accounting_granularity: 'per_call_actual_model',
       pricing_model: pricingProvenance.model,
       pricing_source: pricingProvenance.pricing_source,
       pricing_last_updated: pricingProvenance.pricing_last_updated,
@@ -421,6 +438,8 @@ export async function runToolEvalSuite(
       output_cost_per_million: pricingProvenance.output,
       reasoning_cost_per_million: pricingProvenance.reasoning,
       verification_cost_excluded_from_product_savings: true,
+      per_model_cost_breakdown: aggregatedCosts.per_model_cost_breakdown,
+      bucket_breakdown: aggregatedCosts.bucket_breakdown,
     },
     savings_claims_valid: passedThresholds,
     acceptance_status: acceptanceStatus,

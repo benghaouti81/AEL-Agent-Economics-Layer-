@@ -12,6 +12,7 @@
 import crypto from 'node:crypto';
 import { BUDGET_EVAL_DATASET_VERSION, getBudgetEvalCanonicalCases } from './budget_eval_suite.js';
 import { TOOL_EVAL_DATASET_VERSION, getToolEvalCanonicalCases } from './tool_eval_suite.js';
+import type { BucketBreakdown, ModelCostBreakdownEntry } from './spending_guard.js';
 
 export type BenchmarkSource = 'live_provider' | 'unit_test';
 
@@ -78,6 +79,7 @@ export interface CostMethodology {
   provider_billed_cost_reported: boolean;
   usage_source: 'provider_reported';
   currency: 'USD';
+  accounting_granularity?: 'per_call_actual_model';
   pricing_model: string;
   pricing_source: string;
   pricing_last_updated: string;
@@ -85,6 +87,8 @@ export interface CostMethodology {
   output_cost_per_million: number;
   reasoning_cost_per_million: number;
   verification_cost_excluded_from_product_savings: boolean;
+  per_model_cost_breakdown?: Record<string, ModelCostBreakdownEntry>;
+  bucket_breakdown?: BucketBreakdown;
 }
 
 export interface VerifierResultsSummary {
@@ -341,6 +345,71 @@ export function validateBenchmarkResult(
       errors.push(
         `Missing or invalid cost_methodology.pricing_last_updated ('${String(costMethod.pricing_last_updated)}'; expected YYYY-MM-DD).`
       );
+    }
+
+    const perModel = costMethod.per_model_cost_breakdown;
+    const buckets = costMethod.bucket_breakdown;
+    if (!perModel || typeof perModel !== 'object' || Object.keys(perModel).length === 0) {
+      errors.push('Missing or empty cost_methodology.per_model_cost_breakdown.');
+    } else {
+      for (const [modelKey, entry] of Object.entries(perModel)) {
+        if (
+          !entry ||
+          typeof entry !== 'object' ||
+          !isNonEmptyString(entry.model) ||
+          entry.model !== modelKey ||
+          typeof entry.calls !== 'number' ||
+          entry.calls <= 0 ||
+          !isFiniteNonNeg(entry.input_tokens) ||
+          !isFiniteNonNeg(entry.output_tokens) ||
+          !isFiniteNonNeg(entry.reasoning_tokens) ||
+          !isFiniteNonNeg(entry.total_tokens) ||
+          !isFiniteNonNeg(entry.input_cost_usd) ||
+          !isFiniteNonNeg(entry.output_cost_usd) ||
+          !isFiniteNonNeg(entry.reasoning_cost_usd) ||
+          !isFiniteNonNeg(entry.total_cost_usd) ||
+          !isFiniteNonNeg(entry.input_cost_per_million) ||
+          !isFiniteNonNeg(entry.output_cost_per_million) ||
+          !isFiniteNonNeg(entry.reasoning_cost_per_million) ||
+          !isNonEmptyString(entry.pricing_source) ||
+          !isNonEmptyString(entry.pricing_last_updated) ||
+          entry.cost_estimation_status !== 'estimated_only_not_provider_billed' ||
+          entry.provider_billed_cost_reported !== false
+        ) {
+          errors.push(`Invalid per_model_cost_breakdown entry for model '${modelKey}'.`);
+        }
+      }
+    }
+
+    if (!buckets || typeof buckets !== 'object' || !buckets.baseline || !buckets.ael || !buckets.verifiers) {
+      errors.push('Missing cost_methodology.bucket_breakdown (baseline, ael, verifiers).');
+    } else {
+      for (const bucketName of ['baseline', 'ael', 'verifiers'] as const) {
+        const b = buckets[bucketName];
+        if (!b || typeof b !== 'object' || !isFiniteNonNeg(b.calls) || !isFiniteNonNeg(b.total_cost_usd) || !b.models) {
+          errors.push(`Invalid cost_methodology.bucket_breakdown.${bucketName}.`);
+          continue;
+        }
+        const sumModelCost = Object.values(b.models).reduce((s, m) => s + (m?.total_cost_usd || 0), 0);
+        if (Math.abs(sumModelCost - b.total_cost_usd) > 1e-5) {
+          errors.push(
+            `cost_methodology.bucket_breakdown.${bucketName}.total_cost_usd (${b.total_cost_usd}) disagrees with sum of per-model costs (${sumModelCost}).`
+          );
+        }
+      }
+
+      if (perModel && typeof perModel === 'object' && Object.keys(perModel).length > 0) {
+        const totalPerModelCost = Object.values(perModel).reduce((s, m) => s + (m?.total_cost_usd || 0), 0);
+        const totalBucketsCost =
+          (buckets.baseline.total_cost_usd || 0) +
+          (buckets.ael.total_cost_usd || 0) +
+          (buckets.verifiers.total_cost_usd || 0);
+        if (Math.abs(totalPerModelCost - totalBucketsCost) > 1e-5) {
+          errors.push(
+            `cost_methodology.per_model_cost_breakdown total cost (${totalPerModelCost}) disagrees with sum of buckets (${totalBucketsCost}).`
+          );
+        }
+      }
     }
   }
 

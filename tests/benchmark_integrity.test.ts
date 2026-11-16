@@ -18,6 +18,7 @@ import { AelConfigSchema } from '../src/config/ael_config.js';
 import { LLMClient } from '../src/llm/client.js';
 import {
   PRICING_CATALOG_LAST_UPDATED,
+  aggregateCallCostRecords,
   getProviderPricing,
   resolveLiveProviderProfile,
 } from '../evals/suites/spending_guard.js';
@@ -46,6 +47,49 @@ import { UnitTestLLMDouble } from './helpers/test_llm_double.js';
 function makeValidLiveBudgetResult(overrides: Record<string, any> = {}) {
   const canonicalCases = getBudgetEvalCanonicalCases('held_out', 5);
   const pricing = getProviderPricing('gemini', 'gemini-2.5-flash');
+  const sampleAgg = aggregateCallCostRecords('gemini', {
+    baseline: [
+      {
+        role: 'baseline',
+        requested_model: pricing.model,
+        model: pricing.model,
+        input_tokens: 1000,
+        output_tokens: 800,
+        reasoning_tokens: 4000,
+        total_tokens: 5800,
+        input_cost_usd: 0,
+        output_cost_usd: 0,
+        reasoning_cost_usd: 0,
+        cost_usd: 0,
+        billing_basis: 'estimated_from_provider_usage_and_profile_rates',
+        cost_estimation_status: 'estimated_only_not_provider_billed',
+        provider_billed_cost_reported: false,
+        provider_source: 'gemini',
+        usage_source: 'provider_reported',
+      },
+    ],
+    ael: [
+      {
+        role: 'ael_probe',
+        requested_model: pricing.model,
+        model: pricing.model,
+        input_tokens: 1000,
+        output_tokens: 800,
+        reasoning_tokens: 200,
+        total_tokens: 2000,
+        input_cost_usd: 0,
+        output_cost_usd: 0,
+        reasoning_cost_usd: 0,
+        cost_usd: 0,
+        billing_basis: 'estimated_from_provider_usage_and_profile_rates',
+        cost_estimation_status: 'estimated_only_not_provider_billed',
+        provider_billed_cost_reported: false,
+        provider_source: 'gemini',
+        usage_source: 'provider_reported',
+      },
+    ],
+    verifiers: [],
+  });
   return {
     suite_name: 'AERA/CoBa Thinking Budget Comparative Benchmark (HELD_OUT)',
     source: 'live_provider',
@@ -110,6 +154,7 @@ function makeValidLiveBudgetResult(overrides: Record<string, any> = {}) {
       provider_billed_cost_reported: false,
       usage_source: 'provider_reported',
       currency: 'USD',
+      accounting_granularity: 'per_call_actual_model',
       pricing_model: pricing.model,
       pricing_source: pricing.pricing_source,
       pricing_last_updated: pricing.pricing_last_updated,
@@ -117,6 +162,8 @@ function makeValidLiveBudgetResult(overrides: Record<string, any> = {}) {
       output_cost_per_million: pricing.output,
       reasoning_cost_per_million: pricing.reasoning,
       verification_cost_excluded_from_product_savings: true,
+      per_model_cost_breakdown: sampleAgg.per_model_cost_breakdown,
+      bucket_breakdown: sampleAgg.bucket_breakdown,
     },
     savings_claims_valid: true,
     acceptance_status: 'PASS',
@@ -546,6 +593,30 @@ describe('Benchmark Integrity & Anti-Mock Regression Suite', () => {
     // Tool-DC canonical dataset: unchanged passes, reordered/modified/missing rejected
     const toolCases = getToolEvalCanonicalCases(5);
     const toolPricing = getProviderPricing('gemini', 'gemini-2.5-flash');
+    const toolAgg = aggregateCallCostRecords('gemini', {
+      baseline: [],
+      ael: [
+        {
+          role: 'tool_selection',
+          requested_model: toolPricing.model,
+          model: toolPricing.model,
+          input_tokens: 500,
+          output_tokens: 150,
+          reasoning_tokens: 0,
+          total_tokens: 650,
+          input_cost_usd: 0,
+          output_cost_usd: 0,
+          reasoning_cost_usd: 0,
+          cost_usd: 0,
+          billing_basis: 'estimated_from_provider_usage_and_profile_rates',
+          cost_estimation_status: 'estimated_only_not_provider_billed',
+          provider_billed_cost_reported: false,
+          provider_source: 'gemini',
+          usage_source: 'provider_reported',
+        },
+      ],
+      verifiers: [],
+    });
     const validTool = {
       suite_name: 'Tool-DC Verification & Safety Suite',
       source: 'live_provider',
@@ -603,6 +674,7 @@ describe('Benchmark Integrity & Anti-Mock Regression Suite', () => {
         provider_billed_cost_reported: false,
         usage_source: 'provider_reported',
         currency: 'USD',
+        accounting_granularity: 'per_call_actual_model',
         pricing_model: toolPricing.model,
         pricing_source: toolPricing.pricing_source,
         pricing_last_updated: toolPricing.pricing_last_updated,
@@ -610,6 +682,8 @@ describe('Benchmark Integrity & Anti-Mock Regression Suite', () => {
         output_cost_per_million: toolPricing.output,
         reasoning_cost_per_million: toolPricing.reasoning,
         verification_cost_excluded_from_product_savings: true,
+        per_model_cost_breakdown: toolAgg.per_model_cost_breakdown,
+        bucket_breakdown: toolAgg.bucket_breakdown,
       },
       savings_claims_valid: true,
       acceptance_status: 'PASS',
@@ -695,5 +769,121 @@ describe('Benchmark Integrity & Anti-Mock Regression Suite', () => {
       ...STATISTICAL_AND_VALIDITY_FLOORS,
       ...PROJECT_ACCEPTANCE_TARGETS,
     });
+  });
+
+  it('11. per-call multi-model cost accounting aggregates exact per-call rates across three models, separates buckets, and rejects uncatalogued models (P0-23)', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test-multimodel-eval';
+
+    // Deliberately use 3 distinct OpenAI catalog models with very different rates:
+    // gpt-4o-mini (0.15 / 0.60), gpt-4o (2.50 / 10.00), o3-mini (1.10 / 4.40)
+    const callLog: Array<{ model: string; bucket: 'baseline' | 'ael' | 'verifier'; expectedCost: number }> = [];
+
+    vi.stubGlobal('fetch', vi.fn(async (_url: any, init: any) => {
+      const body = JSON.parse(String(init?.body || '{}'));
+      const requestedModel: string = body?.model || 'gpt-4o-mini';
+      const prompt: string = body?.messages?.[0]?.content || '';
+      const isVerifier = prompt.includes('VERIFY ANSWER CORRECTNESS');
+      const isJudgeEscalation = prompt.includes('EVALUATE EVIDENCE AND RESOLVE QUERY');
+
+      let content = 'Apollo 11 landed on the Moon in 1969.';
+      if (isVerifier) content = '{"correct": true}';
+      else if (prompt.includes('distinct prime factors of 360')) content = '\\boxed{10}';
+      else if (prompt.includes('reverseInPlace')) {
+        content = '```ts\nfunction reverseInPlace<T>(arr: T[]): T[] { let l=0,r=arr.length-1; while(l<r){[arr[l],arr[r]]=[arr[r],arr[l]];l++;r--;} return arr; }\n```';
+      } else if (prompt.includes('Jane Doe')) {
+        content = '{"name":"Jane Doe","email":"jane.doe@acme.io","phone":"+1-555-0192"}';
+      }
+
+      const prompt_tokens = 1000;
+      const completion_tokens = 200;
+      const reasoning_tokens = requestedModel === 'gpt-4o' ? 3000 : isJudgeEscalation ? 400 : 100;
+
+      const pricing = getProviderPricing('openai', requestedModel);
+      const expectedCost = Number(
+        (
+          (prompt_tokens / 1_000_000) * pricing.input +
+          (completion_tokens / 1_000_000) * pricing.output +
+          (reasoning_tokens / 1_000_000) * pricing.reasoning
+        ).toFixed(6)
+      );
+
+      const bucket = isVerifier ? 'verifier' : body?.reasoning_effort === 'high' && !isJudgeEscalation ? 'baseline' : 'ael';
+      callLog.push({ model: requestedModel, bucket, expectedCost });
+
+      return {
+        ok: true,
+        json: async () => ({
+          model: requestedModel,
+          choices: [{ message: { content }, logprobs: { content: [{ logprob: -0.02 }] } }],
+          usage: {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens + completion_tokens + reasoning_tokens,
+            completion_tokens_details: { reasoning_tokens },
+          },
+        }),
+      };
+    }));
+
+    const writeSpy = vi.spyOn(fs, 'writeFileSync').mockImplementation(() => {});
+    const store = new DecisionLogStore(':memory:');
+    try {
+      const res = await runBudgetEvalSuite(store, 'tuning', {
+        provider: 'openai',
+        model: 'gpt-4o-mini',
+        models: {
+          baseline_model: 'gpt-4o',
+          probe_model: 'gpt-4o-mini',
+          judge_model: 'o3-mini',
+          verifier_model: 'gpt-4o-mini',
+        },
+      });
+
+      const buckets = res.cost_methodology.bucket_breakdown!;
+      const perModel = res.cost_methodology.per_model_cost_breakdown!;
+
+      // Verify all three models appear in per_model_cost_breakdown with their distinct rate cards
+      expect(Object.keys(perModel).sort()).toEqual(['gpt-4o', 'gpt-4o-mini', 'o3-mini']);
+      expect(perModel['gpt-4o'].input_cost_per_million).toBe(2.5);
+      expect(perModel['gpt-4o-mini'].input_cost_per_million).toBe(0.15);
+      expect(perModel['o3-mini'].input_cost_per_million).toBe(1.1);
+      expect(res.cost_methodology.cost_estimation_status).toBe('estimated_only_not_provider_billed');
+      expect(res.cost_methodology.provider_billed_cost_reported).toBe(false);
+
+      // Verify exact aggregate sum vs individual call logs per bucket
+      const sumBucket = (b: 'baseline' | 'ael' | 'verifier') =>
+        Number(callLog.filter(c => c.bucket === b).reduce((s, c) => s + c.expectedCost, 0).toFixed(6));
+
+      expect(buckets.baseline.total_cost_usd).toBeCloseTo(sumBucket('baseline'), 6);
+      expect(buckets.ael.total_cost_usd).toBeCloseTo(sumBucket('ael'), 6);
+      expect(buckets.verifiers.total_cost_usd).toBeCloseTo(sumBucket('verifier'), 6);
+      expect(res.verification_cost).toBeCloseTo(buckets.verifiers.total_cost_usd, 6);
+      expect(res.overall_net_savings_usd).toBeCloseTo(
+        buckets.baseline.total_cost_usd - buckets.ael.total_cost_usd,
+        4
+      );
+
+      // Total across per_model_cost_breakdown equals sum of all individual calls
+      const perModelTotal = Object.values(perModel).reduce((s, m) => s + m.total_cost_usd, 0);
+      const exactAllCallsSum = callLog.reduce((s, c) => s + c.expectedCost, 0);
+      expect(perModelTotal).toBeCloseTo(exactAllCallsSum, 5);
+      expect(validateBenchmarkResult(res).valid).toBe(true);
+
+      // Reject uncatalogued model returned by provider instead of silently falling back to primary rates
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          model: 'gpt-99-unlisted-router-model',
+          choices: [{ message: { content: '1969' } }],
+          usage: { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 },
+        }),
+      }));
+      await expect(
+        runBudgetEvalSuite(store, 'tuning', { provider: 'openai', model: 'gpt-4o-mini' })
+      ).rejects.toThrow(/AEL Pricing Error/);
+    } finally {
+      writeSpy.mockRestore();
+      store.close();
+    }
   });
 });

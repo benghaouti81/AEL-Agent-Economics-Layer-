@@ -605,9 +605,16 @@ describe('LLMClient Adapter Layer', () => {
       reasoning_model: 'gemini-4-argon',
       supports_reasoning_effort: true,
       supports_logprobs: false,
-      input_cost_per_million: 0.5,
-      output_cost_per_million: 3.0,
-      reasoning_cost_per_million: 3.0,
+      input_cost_per_million: 1.5,
+      output_cost_per_million: 7.5,
+      reasoning_cost_per_million: 7.5,
+      model_pricing: {
+        'gemini-4-argon': {
+          input_cost_per_million: 2.0,
+          output_cost_per_million: 10.0,
+          reasoning_cost_per_million: 10.0,
+        },
+      },
     });
     const g4Spy = vi.fn().mockResolvedValue({
       candidates: [{ content: { parts: [{ text: '42' }] } }],
@@ -752,7 +759,7 @@ describe('LLMClient Adapter Layer', () => {
       name: 'openai_counting_fixture',
       type: 'openai',
       api_key_env: 'TEST_OPENAI_KEY',
-      default_model: 'gpt-4o-mini',
+      default_model: 'o3-mini',
       cheap_model: 'gpt-4o-mini',
       reasoning_model: 'o3-mini',
       supports_reasoning_effort: true,
@@ -781,6 +788,62 @@ describe('LLMClient Adapter Layer', () => {
     expect(oaiInclusive.reasoning_tokens).toBe(180);
     expect(oaiInclusive.total_tokens).toBe(320);
     expect(oaiInclusive.cost_usd).toBe(openaiClient.calculateCost(100, 40, 180));
+  });
+
+  it('captures Gemini modelVersion per call, computes per-model cost breakdown, and rejects uncatalogued models without primary fallback (P0-23)', async () => {
+    process.env.GEMINI_API_KEY = 'gem-test-multimodel';
+    const client = new LLMClient({
+      name: 'gemini_multimodel',
+      type: 'gemini',
+      api_key_env: 'GEMINI_API_KEY',
+      default_model: 'gemini-2.5-flash',
+      cheap_model: 'gemini-2.5-flash-lite',
+      reasoning_model: 'gemini-2.5-pro',
+      supports_reasoning_effort: true,
+      supports_logprobs: false,
+      input_cost_per_million: 0.30,
+      output_cost_per_million: 2.50,
+      reasoning_cost_per_million: 2.50,
+      model_pricing: {
+        'gemini-2.5-flash-lite': {
+          input_cost_per_million: 0.10,
+          output_cost_per_million: 0.40,
+          reasoning_cost_per_million: 0.40,
+        },
+        'gemini-2.5-pro': {
+          input_cost_per_million: 1.25,
+          output_cost_per_million: 10.0,
+          reasoning_cost_per_million: 10.0,
+        },
+      },
+    });
+
+    const spy = vi
+      .fn()
+      .mockResolvedValueOnce({
+        text: 'pro response',
+        modelVersion: 'models/gemini-2.5-pro',
+        usageMetadata: { promptTokenCount: 1000, candidatesTokenCount: 500, thoughtsTokenCount: 1500, totalTokenCount: 3000 },
+      })
+      .mockResolvedValueOnce({
+        text: 'unknown response',
+        modelVersion: 'gemini-99-unlisted',
+        usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 50, totalTokenCount: 150 },
+      });
+    (client as any).geminiClient = { models: { generateContent: spy } };
+
+    // Requested flash, provider returned pro via modelVersion -> must bill using pro rates, not flash
+    const res = await client.complete('complex query', { model: 'gemini-2.5-flash' });
+    expect(res.requested_model).toBe('gemini-2.5-flash');
+    expect(res.model).toBe('gemini-2.5-pro');
+    expect(res.input_cost_usd).toBeCloseTo(0.00125, 8);
+    expect(res.output_cost_usd).toBeCloseTo(0.005, 8);
+    expect(res.reasoning_cost_usd).toBeCloseTo(0.015, 8);
+    expect(res.cost_usd).toBeCloseTo(0.02125, 6);
+    expect(res.cost_estimation_status).toBe('estimated_only_not_provider_billed');
+
+    // Uncatalogued returned model MUST throw [AEL Pricing Error], never fall back to primary default_model rates
+    await expect(client.complete('unknown returned model')).rejects.toThrow(/AEL Pricing Error/);
   });
 });
 

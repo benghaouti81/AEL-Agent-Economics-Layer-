@@ -9,7 +9,7 @@
 
 import { spawnSync } from 'node:child_process';
 import * as esbuild from 'esbuild';
-import { LLMClient } from '../../src/llm/client.js';
+import { CallUsageRecord, LLMClient } from '../../src/llm/client.js';
 
 export type VerificationMethod = 'numeric_match' | 'code_execution' | 'json_field_match' | 'judge_verdict';
 
@@ -286,13 +286,15 @@ export async function verifyReasoningJudgeVerdict(
   llm: LLMClient,
   query: string,
   referenceAnswer: string,
-  candidateResponse: string
+  candidateResponse: string,
+  options: { model?: string } = {}
 ): Promise<{
   result: VerificationResult;
   judgeCostUsd: number;
   judgeTokens: number;
   provider_source?: string;
   usage_source?: string;
+  callRecord?: CallUsageRecord;
 }> {
   if (!candidateResponse || !candidateResponse.trim()) {
     return {
@@ -311,7 +313,11 @@ export async function verifyReasoningJudgeVerdict(
     'Reply strictly with JSON: {"correct": true} or {"correct": false}.',
   ].join('\n');
 
-  const judgeRes = await llm.complete(judgePrompt, { reasoning_effort: 'none' });
+  const requestedModel = options.model || llm.getProfile().default_model;
+  const judgeRes = await llm.complete(judgePrompt, {
+    ...(options.model ? { model: options.model } : {}),
+    reasoning_effort: 'none',
+  });
 
   let correct = false;
   try {
@@ -323,6 +329,25 @@ export async function verifyReasoningJudgeVerdict(
   } catch {
     correct = false;
   }
+
+  const callRecord: CallUsageRecord = {
+    role: 'verifier',
+    requested_model: judgeRes.requested_model || requestedModel,
+    model: judgeRes.model,
+    input_tokens: judgeRes.input_tokens,
+    output_tokens: judgeRes.output_tokens,
+    reasoning_tokens: judgeRes.reasoning_tokens,
+    total_tokens: judgeRes.total_tokens,
+    input_cost_usd: judgeRes.input_cost_usd,
+    output_cost_usd: judgeRes.output_cost_usd,
+    reasoning_cost_usd: judgeRes.reasoning_cost_usd,
+    cost_usd: judgeRes.cost_usd,
+    billing_basis: 'estimated_from_provider_usage_and_profile_rates',
+    cost_estimation_status: 'estimated_only_not_provider_billed',
+    provider_billed_cost_reported: false,
+    provider_source: judgeRes.provider_source,
+    usage_source: judgeRes.usage_source,
+  };
 
   return {
     result: {
@@ -336,5 +361,6 @@ export async function verifyReasoningJudgeVerdict(
     judgeTokens: judgeRes.total_tokens,
     provider_source: judgeRes.provider_source,
     usage_source: judgeRes.usage_source,
+    callRecord,
   };
 }
