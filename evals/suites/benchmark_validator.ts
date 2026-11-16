@@ -12,7 +12,12 @@
 import crypto from 'node:crypto';
 import { BUDGET_EVAL_DATASET_VERSION, getBudgetEvalCanonicalCases } from './budget_eval_suite.js';
 import { TOOL_EVAL_DATASET_VERSION, getToolEvalCanonicalCases } from './tool_eval_suite.js';
-import type { BucketBreakdown, ModelCostBreakdownEntry } from './spending_guard.js';
+import type {
+  BucketBreakdown,
+  ModelCostBreakdownEntry,
+  PricingServiceTier,
+  PricingVerificationStatus,
+} from './spending_guard.js';
 
 export type BenchmarkSource = 'live_provider' | 'unit_test';
 
@@ -81,11 +86,16 @@ export interface CostMethodology {
   currency: 'USD';
   accounting_granularity?: 'per_call_actual_model';
   pricing_model: string;
+  service_tier?: PricingServiceTier;
+  pricing_status?: PricingVerificationStatus;
   pricing_source: string;
   pricing_last_updated: string;
+  effective_date_range?: string;
   input_cost_per_million: number;
   output_cost_per_million: number;
   reasoning_cost_per_million: number;
+  cached_input_cost_per_million?: number | null;
+  output_includes_thinking?: boolean;
   verification_cost_excluded_from_product_savings: boolean;
   per_model_cost_breakdown?: Record<string, ModelCostBreakdownEntry>;
   bucket_breakdown?: BucketBreakdown;
@@ -338,6 +348,9 @@ export function validateBenchmarkResult(
         `Missing or mismatched cost_methodology.pricing_model ('${String(costMethod.pricing_model)}' vs model '${String(data.model)}').`
       );
     }
+    if (costMethod.pricing_status === 'unverified') {
+      errors.push('cost_methodology.pricing_status is unverified; benchmark evidence cannot claim official pricing from an unverified model.');
+    }
     if (!isNonEmptyString(costMethod.pricing_source)) {
       errors.push('Missing cost_methodology.pricing_source.');
     }
@@ -358,6 +371,7 @@ export function validateBenchmarkResult(
           typeof entry !== 'object' ||
           !isNonEmptyString(entry.model) ||
           entry.model !== modelKey ||
+          entry.pricing_status === 'unverified' ||
           typeof entry.calls !== 'number' ||
           entry.calls <= 0 ||
           !isFiniteNonNeg(entry.input_tokens) ||

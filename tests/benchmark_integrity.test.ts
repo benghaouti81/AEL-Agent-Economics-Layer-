@@ -20,6 +20,8 @@ import {
   PRICING_CATALOG_LAST_UPDATED,
   aggregateCallCostRecords,
   getProviderPricing,
+  inspectProviderPricingCatalogEntry,
+  listCatalogModels,
   resolveLiveProviderProfile,
 } from '../evals/suites/spending_guard.js';
 import {
@@ -885,5 +887,80 @@ describe('Benchmark Integrity & Anti-Mock Regression Suite', () => {
       writeSpy.mockRestore();
       store.close();
     }
+  });
+
+  it('12. verifies Gemini pricing catalog against official multi-tier rates, effective dates, and marks unverifiable models unverified (P0-24)', () => {
+    // Gemini 4 Hydrogen: Standard $1.50/$7.50 ($0.075 cached), Batch/Flex $0.75/$3.75, Priority $2.70/$13.50
+    const hStd = getProviderPricing('gemini', 'gemini-4-hydrogen', 'standard');
+    const hBatch = getProviderPricing('gemini', 'gemini-4-hydrogen', 'batch');
+    const hFlex = getProviderPricing('gemini', 'gemini-4-hydrogen', 'flex');
+    const hPri = getProviderPricing('gemini', 'gemini-4-hydrogen', 'priority');
+    expect(hStd.pricing_status).toBe('verified_official');
+    expect(hStd.output_includes_thinking).toBe(true);
+    expect(hStd.caching_support).toBe('implicit_only');
+    expect([hStd.input, hStd.output, hStd.cached_input]).toEqual([1.50, 7.50, 0.075]);
+    expect([hBatch.input, hBatch.output, hBatch.cached_input]).toEqual([0.75, 3.75, 0.0375]);
+    expect([hFlex.input, hFlex.output, hFlex.cached_input]).toEqual([0.75, 3.75, 0.0375]);
+    expect([hPri.input, hPri.output, hPri.cached_input]).toEqual([2.70, 13.50, 0.135]);
+
+    // Gemini 4 Argon: through 2026-11-30 ($2.00/$10.00 Standard), increasing 2026-12-01 ($4.00/$20.00 Standard)
+    const aNovStd = getProviderPricing('gemini', 'gemini-4-argon', 'standard', '2026-11-16');
+    const aNovBatch = getProviderPricing('gemini', 'gemini-4-argon', 'batch', '2026-11-16');
+    const aNovPri = getProviderPricing('gemini', 'gemini-4-argon', 'priority', '2026-11-16');
+    expect([aNovStd.input, aNovStd.output, aNovStd.cached_input]).toEqual([2.00, 10.00, 0.10]);
+    expect([aNovBatch.input, aNovBatch.output, aNovBatch.cached_input]).toEqual([1.00, 5.00, 0.05]);
+    expect([aNovPri.input, aNovPri.output, aNovPri.cached_input]).toEqual([3.60, 18.00, 0.18]);
+    expect(aNovStd.effective_date_range).toContain('2026-11-30');
+    expect(aNovStd.effective_date_range).toContain('2026-12-01');
+
+    const aDecStd = getProviderPricing('gemini', 'gemini-4-argon', 'standard', '2026-12-01');
+    const aDecBatch = getProviderPricing('gemini', 'gemini-4-argon', 'batch', '2026-12-01');
+    const aDecPri = getProviderPricing('gemini', 'gemini-4-argon', 'priority', '2026-12-01');
+    expect([aDecStd.input, aDecStd.output, aDecStd.cached_input]).toEqual([4.00, 20.00, 0.20]);
+    expect([aDecBatch.input, aDecBatch.output, aDecBatch.cached_input]).toEqual([2.00, 10.00, 0.10]);
+    expect([aDecPri.input, aDecPri.output, aDecPri.cached_input]).toEqual([7.20, 36.00, 0.36]);
+
+    // Gemini 3.5 Flash-Lite, 3.1 Flash-Lite, 2.5 Flash official rates & tier distinctions (e.g. 3.5 Flex cached $0.02 vs Batch $0.015)
+    const fl35Std = getProviderPricing('gemini', 'gemini-3.5-flash-lite', 'standard');
+    const fl35Batch = getProviderPricing('gemini', 'gemini-3.5-flash-lite', 'batch');
+    const fl35Flex = getProviderPricing('gemini', 'gemini-3.5-flash-lite', 'flex');
+    const fl35Pri = getProviderPricing('gemini', 'gemini-3.5-flash-lite', 'priority');
+    expect([fl35Std.input, fl35Std.output, fl35Std.cached_input]).toEqual([0.30, 2.50, 0.03]);
+    expect([fl35Batch.input, fl35Batch.output, fl35Batch.cached_input]).toEqual([0.15, 1.25, 0.015]);
+    expect([fl35Flex.input, fl35Flex.output, fl35Flex.cached_input]).toEqual([0.15, 1.25, 0.02]);
+    expect([fl35Pri.input, fl35Pri.output, fl35Pri.cached_input]).toEqual([0.54, 4.50, 0.05]);
+    expect(() => getProviderPricing('gemini', 'gemini-3.5-flash-lite', 'contributor')).toThrow(/AEL Pricing Error/);
+
+    const fl31Std = getProviderPricing('gemini', 'gemini-3.1-flash-lite', 'standard');
+    expect([fl31Std.input, fl31Std.output, fl31Std.cached_input]).toEqual([0.25, 1.50, 0.025]);
+
+    const f25Std = getProviderPricing('gemini', 'gemini-2.5-flash', 'standard');
+    expect([f25Std.input, f25Std.output, f25Std.cached_input]).toEqual([0.30, 2.50, 0.03]);
+
+    // Models absent from Google's official pricing docs (gemini-3-pro-preview) MUST be marked 'unverified', have zero invented rates, and fail getProviderPricing
+    const unverifiedMeta = inspectProviderPricingCatalogEntry('gemini', 'gemini-3-pro-preview');
+    expect(unverifiedMeta.pricing_status).toBe('unverified');
+    expect(unverifiedMeta.tiers).toBeNull();
+    expect(unverifiedMeta.pricing_source.toLowerCase()).toContain('unverified');
+    expect(() => getProviderPricing('gemini', 'gemini-3-pro-preview')).toThrow(/marked 'unverified'/);
+
+    // Every Gemini catalog entry carries explicit provenance and effective dates
+    for (const modelId of listCatalogModels('gemini')) {
+      const meta = inspectProviderPricingCatalogEntry('gemini', modelId);
+      expect(meta.pricing_source.length).toBeGreaterThan(10);
+      expect(meta.pricing_last_updated).toBe(PRICING_CATALOG_LAST_UPDATED);
+      expect(meta.effective_date_range.length).toBeGreaterThan(5);
+      expect(typeof meta.output_includes_thinking).toBe('boolean');
+    }
+
+    // Validator rejects any benchmark result claiming pricing_status='unverified'
+    const baseValid = makeValidLiveBudgetResult();
+    const invalidUnverified = makeValidLiveBudgetResult({
+      cost_methodology: {
+        ...baseValid.cost_methodology,
+        pricing_status: 'unverified',
+      },
+    });
+    expect(validateBenchmarkResult(invalidUnverified).valid).toBe(false);
   });
 });

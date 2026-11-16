@@ -138,14 +138,29 @@ describe('Live Evaluation Credentials & Spending Guard', () => {
     store.close();
   });
 
-  it('projects Gemini 2.5 Flash combined live eval cost under $1.00 and aborts when projected cost > cap', () => {
-    const toolProj = projectToolEvalCost(buildLiveGeminiToolProfile());
-    const budgetProj = projectBudgetEvalCost('held_out', buildLiveGeminiBudgetProfile());
-    const combinedCost = toolProj.projectedCostUsd + budgetProj.projectedCostUsd;
+  it('projects limited-sample and Flash-Lite live eval costs under $1.00 while aborting over-cap full runs under official Gemini pricing', () => {
+    // Full 200q on gemini-2.5-flash-lite ($0.10/$0.40) stays well under $1.00
+    const flashLiteToolProj = projectToolEvalCost(buildLiveGeminiToolProfile('gemini-2.5-flash-lite'));
+    const flashLiteBudgetProj = projectBudgetEvalCost('held_out', buildLiveGeminiBudgetProfile('gemini-2.5-flash-lite'));
+    const flashLiteCombined = flashLiteToolProj.projectedCostUsd + flashLiteBudgetProj.projectedCostUsd;
+    expect(flashLiteCombined).toBeGreaterThan(0);
+    expect(flashLiteCombined).toBeLessThan(MAX_LIVE_EVAL_COST_USD);
+    expect(() => assertWithinSpendingGuard(flashLiteCombined, MAX_LIVE_EVAL_COST_USD, 'combined-flash-lite')).not.toThrow();
 
-    expect(combinedCost).toBeGreaterThan(0);
-    expect(combinedCost).toBeLessThan(MAX_LIVE_EVAL_COST_USD);
-    expect(() => assertWithinSpendingGuard(combinedCost, MAX_LIVE_EVAL_COST_USD, 'combined')).not.toThrow();
+    // Workflow-default --limit 5 on gemini-3.5-flash-lite ($0.30/$2.50) stays well under $1.00
+    const limitedDefaultTool = projectToolEvalCost(buildLiveGeminiToolProfile('gemini-3.5-flash-lite'), 5);
+    const limitedDefaultBudget = projectBudgetEvalCost('held_out', buildLiveGeminiBudgetProfile('gemini-3.5-flash-lite'), 5);
+    const limitedDefaultCombined = limitedDefaultTool.projectedCostUsd + limitedDefaultBudget.projectedCostUsd;
+    expect(limitedDefaultCombined).toBeGreaterThan(0);
+    expect(limitedDefaultCombined).toBeLessThan(MAX_LIVE_EVAL_COST_USD);
+    expect(() => assertWithinSpendingGuard(limitedDefaultCombined, MAX_LIVE_EVAL_COST_USD, 'combined-limit-5')).not.toThrow();
+
+    // Full 200q on gemini-2.5-flash at official $0.30/$2.50 rates exceeds $1.00 and aborts unless capped via --limit
+    const full25FlashBudget = projectBudgetEvalCost('held_out', buildLiveGeminiBudgetProfile('gemini-2.5-flash'));
+    expect(full25FlashBudget.projectedCostUsd).toBeGreaterThan(MAX_LIVE_EVAL_COST_USD);
+    expect(() => assertWithinSpendingGuard(full25FlashBudget.projectedCostUsd, MAX_LIVE_EVAL_COST_USD, 'full-25-flash')).toThrow(
+      /Spending Guard ABORT/
+    );
 
     const expensiveProj = estimateProjectedEvalCost({
       queries: Array.from({ length: 200 }, (_, i) => `Complex query ${i}`),
