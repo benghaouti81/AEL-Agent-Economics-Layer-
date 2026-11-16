@@ -13,6 +13,7 @@ import {
   assertValidGeminiKey,
   assertWithinSpendingGuard,
   estimateProjectedEvalCost,
+  getProviderPricing,
   resolveLiveProviderProfile,
 } from '../evals/suites/spending_guard.js';
 import { buildLiveGeminiBudgetProfile, projectBudgetEvalCost, runBudgetEvalSuite } from '../evals/suites/budget_eval_suite.js';
@@ -302,6 +303,29 @@ describe('Live Evaluation Credentials & Spending Guard', () => {
     } finally {
       writeSpy.mockRestore();
       store.close();
+    }
+  });
+
+  it('verifies every Gemini model referenced in live-eval.yml defaults exists in PROVIDER_PRICING_CATALOG (P0-22)', () => {
+    const workflowPath = path.resolve(process.cwd(), '.github/workflows/live-eval.yml');
+    const workflowText = fs.readFileSync(workflowPath, 'utf8');
+
+    const inputDefaultMatch = workflowText.match(/default:\s*'([^']+)'/);
+    const envFallbackMatch = workflowText.match(/EVAL_MODEL:\s*\$\{\{\s*inputs\.model\s*\|\|\s*'([^']+)'\s*\}\}/);
+
+    expect(inputDefaultMatch).not.toBeNull();
+    expect(envFallbackMatch).not.toBeNull();
+
+    const referencedDefaults = Array.from(
+      new Set([inputDefaultMatch![1].trim(), envFallbackMatch![1].trim()])
+    );
+    expect(referencedDefaults).toEqual(['gemini-3.5-flash-lite']);
+
+    for (const modelId of referencedDefaults) {
+      const pricing = getProviderPricing('gemini', modelId);
+      expect(pricing.model).toBe(modelId);
+      expect(pricing.input).toBeGreaterThan(0);
+      expect(pricing.output).toBeGreaterThan(0);
     }
   });
 });

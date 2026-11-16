@@ -41,10 +41,17 @@ export interface ProviderPricingEntry {
   is_estimated_rate_card: true;
 }
 
-export const PRICING_CATALOG_LAST_UPDATED = '2026-11-15';
+export const PRICING_CATALOG_LAST_UPDATED = '2026-11-16';
 
 const PROVIDER_PRICING_CATALOG: Record<LiveProviderType, Record<string, Omit<ProviderPricingEntry, 'provider' | 'model' | 'is_estimated_rate_card'>>> = {
   gemini: {
+    'gemini-3.5-flash-lite': {
+      input: 0.30,
+      output: 2.50,
+      reasoning: 2.50,
+      pricing_source: 'Google Gemini API Pricing (https://ai.google.dev/gemini-api/docs/pricing#gemini-3.5-flash-lite) — Standard paid tier snapshot',
+      pricing_last_updated: PRICING_CATALOG_LAST_UPDATED,
+    },
     'gemini-2.5-flash': {
       input: 0.15,
       output: 0.60,
